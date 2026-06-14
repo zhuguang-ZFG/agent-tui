@@ -59,6 +59,15 @@ pub fn unique_task(prefix: &str) -> String {
     format!("{prefix}-{ms}")
 }
 
+/// First agent that is NOT the lead — used as the default test worker.
+fn pick_non_lead(agents: &[crate::config::AgentSpec], lead: &str) -> String {
+    agents
+        .iter()
+        .find(|a| !a.name.eq_ignore_ascii_case(lead))
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| "claude".into())
+}
+
 fn without_review_gate<T, F: FnOnce() -> Result<T>>(f: F) -> Result<T> {
     std::env::set_var("AGENT_TUI_REVIEW_GATE", "0");
     let out = f();
@@ -116,13 +125,15 @@ pub fn verify_parsers() -> Result<()> {
 pub fn verify_events_chain(project_dir: &Path) -> Result<VerifyOutcome> {
     let agents = load_agents(project_dir)?;
     let lead = resolve_lead_agent(&agents);
+    let worker = pick_non_lead(&agents, &lead);
     let task = unique_task("loop-verify");
     let plan_text = format!(
         r#"
 ```agent-plan
-[{{"worker":"codex","task":"{task}","description":"闭环验证任务"}}]
+[{{"worker":"{worker}","task":"{task}","description":"闭环验证任务"}}]
 ```
-"#
+"#,
+        worker = worker, task = task
     );
 
     let names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
@@ -137,7 +148,7 @@ pub fn verify_events_chain(project_dir: &Path) -> Result<VerifyOutcome> {
     delegation::delegate_task(
         project_dir,
         &lead,
-        "codex",
+        &worker,
         &task,
         "闭环验证：echo ok",
     )
@@ -151,14 +162,14 @@ pub fn verify_events_chain(project_dir: &Path) -> Result<VerifyOutcome> {
 "#
     );
     let mut seen_r = HashSet::new();
-    let reports = report_watch::reports_from_text("codex", &report_text, &mut seen_r, None);
+    let reports = report_watch::reports_from_text(&worker, &report_text, &mut seen_r, None);
     if reports.len() != 1 {
         bail!("expected 1 report, got {}", reports.len());
     }
     let r = &reports[0];
     delegation::report_task_auto(
         project_dir,
-        "codex",
+        &worker,
         &lead,
         &r.task,
         &r.status,
@@ -176,11 +187,11 @@ pub fn verify_events_chain(project_dir: &Path) -> Result<VerifyOutcome> {
     let has_claim = tail.iter().any(|e| {
         e.kind == "claim"
             && e.task.as_deref() == Some(task.as_str())
-            && e.agent.as_deref() == Some("codex")
+            && e.agent.as_deref() == Some(worker.as_str())
     });
     let has_delegate_notify = tail.iter().any(|e| {
         e.kind == "notify"
-            && e.agent.as_deref() == Some("codex")
+            && e.agent.as_deref() == Some(worker.as_str())
             && e.from == lead
             && e.message.contains("【委派·")
             && e.message.contains(&task)
@@ -188,7 +199,7 @@ pub fn verify_events_chain(project_dir: &Path) -> Result<VerifyOutcome> {
     let has_report_notify = tail.iter().any(|e| {
         e.kind == "notify"
             && e.agent.as_deref() == Some(lead.as_str())
-            && e.from == "codex"
+            && e.from == worker
             && e.message.contains("【回执·")
             && e.message.contains(&task)
     });
@@ -197,13 +208,13 @@ pub fn verify_events_chain(project_dir: &Path) -> Result<VerifyOutcome> {
         bail!("missing claim event for {task}");
     }
     if !has_delegate_notify {
-        bail!("missing delegate notify to codex for {task}");
+        bail!("missing delegate notify to {worker} for {task}");
     }
     if !has_report_notify {
         bail!("missing report notify to {lead} for {task}");
     }
 
-    verify_memory_artifacts(project_dir, &lead, "codex", &task)?;
+    verify_memory_artifacts(project_dir, &lead, &worker, &task)?;
     verify_mailbox_and_state(project_dir, &lead, &task)?;
 
     Ok(VerifyOutcome {
@@ -270,13 +281,13 @@ fn verify_memory_artifacts(
     }
 
     let mem_worker = std::fs::read_to_string(agent_memory::memory_md_path(project_dir, worker))?;
-    if !mem_worker.contains(&format!("| {task} | done | codex |")) {
-        bail!("worker MEMORY missing done assignment row for codex");
+    if !mem_worker.contains(&format!("| {task} | done | {worker} |")) {
+        bail!("worker MEMORY missing done assignment row for {worker}");
     }
 
     let mem_lead = std::fs::read_to_string(agent_memory::memory_md_path(project_dir, lead))?;
-    if !mem_lead.contains(&format!("| {task} | done | codex |")) {
-        bail!("lead MEMORY missing done assignment row pointing to codex");
+    if !mem_lead.contains(&format!("| {task} | done | {worker} |")) {
+        bail!("lead MEMORY missing done assignment row pointing to {worker}");
     }
 
     Ok(())
@@ -286,18 +297,18 @@ fn verify_memory_artifacts(
 pub fn verify_failed_retry_chain(project_dir: &Path) -> Result<RetryVerifyOutcome> {
     let agents = load_agents(project_dir)?;
     let lead = resolve_lead_agent(&agents);
-    let failed_worker = "codex";
+    let failed_worker = pick_non_lead(&agents, &lead);
     if !agents.iter().any(|a| a.name == failed_worker) {
-        bail!("verify retry: agents.yaml missing codex");
+        bail!("verify retry: agents.yaml missing {failed_worker}");
     }
     let expected_retry_worker =
-        dead_letter::pick_retry_worker(project_dir, &lead, failed_worker, 1);
+        dead_letter::pick_retry_worker(project_dir, &lead, &failed_worker, 1);
 
     let task = unique_task("retry-verify");
     delegation::delegate_task(
         project_dir,
         &lead,
-        failed_worker,
+        &failed_worker,
         &task,
         "重试验证：模拟首次失败",
     )
@@ -305,7 +316,7 @@ pub fn verify_failed_retry_chain(project_dir: &Path) -> Result<RetryVerifyOutcom
 
     delegation::report_task_auto(
         project_dir,
-        failed_worker,
+        &failed_worker,
         &lead,
         &task,
         "failed",
@@ -346,7 +357,7 @@ pub fn verify_failed_retry_chain(project_dir: &Path) -> Result<RetryVerifyOutcom
         if pending.worker == failed_worker {
             bail!("worker rotation enabled but retry targets same worker");
         }
-        if pending.previous_worker.as_deref() != Some(failed_worker) {
+        if pending.previous_worker.as_deref() != Some(&failed_worker) {
             bail!(
                 "retry previous_worker expected {failed_worker}, got {:?}",
                 pending.previous_worker
@@ -375,7 +386,7 @@ pub fn verify_failed_retry_chain(project_dir: &Path) -> Result<RetryVerifyOutcom
         .filter(|e| e.kind == "delegate" && e.task.as_deref() == Some(task.as_str()))
         .map(|e| e.to.as_str())
         .collect();
-    if !delegate_workers.contains(&failed_worker) {
+    if !delegate_workers.contains(&failed_worker.as_str()) {
         bail!("mailbox missing initial delegate to {failed_worker}");
     }
     if !delegate_workers.contains(&expected_retry_worker.as_str()) {
@@ -415,21 +426,27 @@ pub fn verify_failed_retry_chain(project_dir: &Path) -> Result<RetryVerifyOutcom
 pub fn verify_dag_chain(project_dir: &Path) -> Result<DagVerifyOutcome> {
     let agents = load_agents(project_dir)?;
     let lead = resolve_lead_agent(&agents);
-    if !agents.iter().any(|a| a.name == "codex") || !agents.iter().any(|a| a.name == "kimi") {
-        bail!("verify DAG: need codex + kimi in agents.yaml");
+    let worker_a = pick_non_lead(&agents, &lead);
+    let worker_b = agents
+        .iter()
+        .find(|a| a.name != lead && a.name != worker_a)
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| "kimi".into());
+    if !agents.iter().any(|a| a.name == worker_a) || !agents.iter().any(|a| a.name == worker_b) {
+        bail!("verify DAG: need two non-lead agents in agents.yaml");
     }
 
     let dep_task = unique_task("dag-dep");
     let follow_task = unique_task("dag-ui");
     let items = vec![
         lead_watch::PlanItem {
-            worker: "codex".into(),
+            worker: worker_a.clone(),
             task: dep_task.clone(),
             description: "DAG 验证：前置 API".into(),
             depends_on: vec![],
         },
         lead_watch::PlanItem {
-            worker: "kimi".into(),
+            worker: worker_b.clone(),
             task: follow_task.clone(),
             description: "DAG 验证：依赖前置的 UI".into(),
             depends_on: vec![dep_task.clone()],
@@ -449,16 +466,16 @@ pub fn verify_dag_chain(project_dir: &Path) -> Result<DagVerifyOutcome> {
     let entries = mailbox::load_entries(project_dir, 80);
     let kimi_delegated = entries.iter().any(|e| {
         e.kind == "delegate"
-            && e.to == "kimi"
+            && e.to == worker_b
             && e.task.as_deref() == Some(follow_task.as_str())
     });
     if kimi_delegated {
-        bail!("DAG: kimi should not be delegated before dep completes");
+        bail!("DAG: {worker_b} should not be delegated before dep completes");
     }
 
     delegation::report_task_auto(
         project_dir,
-        "codex",
+        &worker_a,
         &lead,
         &dep_task,
         "done",
@@ -474,10 +491,10 @@ pub fn verify_dag_chain(project_dir: &Path) -> Result<DagVerifyOutcome> {
     let entries2 = mailbox::load_entries(project_dir, 80);
     if !entries2.iter().any(|e| {
         e.kind == "delegate"
-            && e.to == "kimi"
+            && e.to == worker_b
             && e.task.as_deref() == Some(follow_task.as_str())
     }) {
-        bail!("DAG: missing kimi delegate after dep done");
+        bail!("DAG: missing {worker_b} delegate after dep done");
     }
 
     match task_state::load_snapshots(project_dir)
@@ -498,18 +515,19 @@ pub fn verify_dag_chain(project_dir: &Path) -> Result<DagVerifyOutcome> {
 pub fn verify_lead_followup_chain(project_dir: &Path) -> Result<()> {
     let agents = load_agents(project_dir)?;
     let lead = resolve_lead_agent(&agents);
+    let worker = pick_non_lead(&agents, &lead);
     let task1 = unique_task("follow-dep");
 
     delegation::delegate_task(
         project_dir,
         &lead,
-        "codex",
+        &worker,
         &task1,
         "续派验证：前置任务",
     )?;
     delegation::report_task_auto(
         project_dir,
-        "codex",
+        &worker,
         &lead,
         &task1,
         "done",
@@ -550,19 +568,20 @@ pub fn verify_lead_followup_chain(project_dir: &Path) -> Result<()> {
 pub fn verify_lead_transcript_followup_chain(project_dir: &Path) -> Result<()> {
     let agents = load_agents(project_dir)?;
     let lead = resolve_lead_agent(&agents);
+    let worker = pick_non_lead(&agents, &lead);
     let names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
     let task1 = unique_task("tx-follow-dep");
 
     delegation::delegate_task(
         project_dir,
         &lead,
-        "codex",
+        &worker,
         &task1,
         "transcript 续派验证",
     )?;
     delegation::report_task_auto(
         project_dir,
-        "codex",
+        &worker,
         &lead,
         &task1,
         "done",
@@ -650,14 +669,16 @@ pub fn verify_relay_cursor_hold() -> Result<()> {
 pub fn verify_persistent_plan_dedupe(project_dir: &Path) -> Result<()> {
     let agents = load_agents(project_dir)?;
     let lead = resolve_lead_agent(&agents);
+    let worker = pick_non_lead(&agents, &lead);
     let names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
     let task = unique_task("dedupe-plan");
     let text = format!(
         r#"
 ```agent-plan
-[{{"worker":"codex","task":"{task}","description":"dedupe"}}]
+[{{"worker":"{worker}","task":"{task}","description":"dedupe"}}]
 ```
-"#
+"#,
+        worker = worker, task = task
     );
     let mut first = lead_watch::LeadWatchState::new(project_dir, &lead);
     let n1 = lead_watch::plans_from_text(
@@ -686,17 +707,23 @@ pub fn verify_persistent_plan_dedupe(project_dir: &Path) -> Result<()> {
 pub fn verify_dag_cycle_rejected(project_dir: &Path) -> Result<()> {
     let agents = load_agents(project_dir)?;
     let lead = resolve_lead_agent(&agents);
+    let worker_a = pick_non_lead(&agents, &lead);
+    let worker_b = agents
+        .iter()
+        .find(|a| a.name != lead && a.name != worker_a)
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| "kimi".into());
     let task_a = unique_task("cycle-a");
     let task_b = unique_task("cycle-b");
     let items = vec![
         lead_watch::PlanItem {
-            worker: "codex".into(),
+            worker: worker_a,
             task: task_a.clone(),
             description: "环检测 A".into(),
             depends_on: vec![task_b.clone()],
         },
         lead_watch::PlanItem {
-            worker: "kimi".into(),
+            worker: worker_b,
             task: task_b.clone(),
             description: "环检测 B".into(),
             depends_on: vec![task_a.clone()],
@@ -770,16 +797,18 @@ pub fn verify_lead_identity_sync(project_dir: &Path) -> Result<()> {
         bail!("STRENGTHS.md missing 优势委派 section");
     }
 
+    let worker = pick_non_lead(&agents, &lead);
+
     let hint = crate::agent_strengths::delegation_mismatch(
         &agents,
         &lead,
-        "codex",
+        &worker,
         "ui-dashboard",
         "React dashboard 组件与 Tailwind 样式",
         Some(project_dir),
     );
     if hint.is_none() {
-        bail!("delegation mismatch: expected UI task on codex to suggest kimi");
+        bail!("delegation mismatch: expected UI task on {worker} to suggest kimi");
     }
 
     let agents_md = spec.worktree.join("AGENTS.md");
@@ -867,11 +896,12 @@ pub fn verify_blocked_escalation(project_dir: &Path) -> Result<()> {
         .map(|a| a.name.clone())
         .ok_or_else(|| anyhow::anyhow!("verify blocked: need advisor in agents.yaml"))?;
 
+    let worker = pick_non_lead(&agents, &lead);
     let task = unique_task("blocked-esc");
-    delegation::delegate_task(project_dir, &lead, "codex", &task, "blocked 升级验证")?;
+    delegation::delegate_task(project_dir, &lead, &worker, &task, "blocked 升级验证")?;
     delegation::report_task_auto(
         project_dir,
-        "codex",
+        &worker,
         &lead,
         &task,
         "blocked",
