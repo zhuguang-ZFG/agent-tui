@@ -34,6 +34,14 @@ agents:
     command: "cursor agent"
     role: "advisor"
     enabled: true
+  kilo:
+    command: "kilo"
+    role: "tester"
+    enabled: true
+  opencode:
+    command: "opencode"
+    role: "integrator"
+    enabled: true
 "#;
 
 const MINIMAL_AGENTS_YAML: &str = r#"# Minimal roster — agent-tui init --minimal

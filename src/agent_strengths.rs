@@ -114,6 +114,44 @@ fn builtin_profile(name: &str, role: &str) -> AgentProfile {
             ],
             avoid: vec!["核心后端 API", "数据库迁移", "Rust 系统层"],
         },
+        "kilo" => AgentProfile {
+            name: name.into(),
+            role: role.into(),
+            engine: "Kilo Code",
+            strengths: vec![
+                "端到端测试",
+                "QA 与回归",
+                "pytest/vitest",
+                "benchmark 与性能",
+                "测试覆盖率分析",
+            ],
+            best_for: vec![
+                "E2E 测试编写与维护",
+                "回归验证与 smoke test",
+                "benchmark 跑分与报告",
+                "测试缺口补全",
+            ],
+            avoid: vec!["新功能从零实现", "大重构主开发", "Lead 编排"],
+        },
+        "opencode" => AgentProfile {
+            name: name.into(),
+            role: role.into(),
+            engine: "OpenCode",
+            strengths: vec![
+                "CI/CD 管线",
+                "Docker/Compose",
+                "部署与发布",
+                "多 Agent 集成",
+                "自动化流水线",
+            ],
+            best_for: vec![
+                "GitHub Actions / CI 配置",
+                "Docker 容器化与环境",
+                "部署脚本与 release",
+                "跨工具集成任务",
+            ],
+            avoid: vec!["核心业务逻辑", "UI 组件", "代替 Lead 续派"],
+        },
         _ => match role {
             "executor" => AgentProfile {
                 name: name.into(),
@@ -217,6 +255,8 @@ fn agent_bucket_scores(name: &str, role: &str) -> [i32; 5] {
         "mimo" => [0, 1, 15, 1, 1],
         "claude" => [0, 2, 2, 12, 4],
         "cursor" => [0, 0, 0, 8, 2],
+        "kilo" => [0, 3, 12, 0, 1],
+        "opencode" => [0, 10, 2, 1, 3],
         _ => match role {
             "frontend" => [10, 1, 0, 0, 2],
             "executor" => [1, 10, 2, 0, 1],
