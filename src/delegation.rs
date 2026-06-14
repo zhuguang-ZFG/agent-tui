@@ -1,3 +1,5 @@
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{bail, Result};
@@ -10,6 +12,28 @@ use crate::report_gate;
 use crate::review_gate;
 use crate::task_dag;
 use crate::terminal;
+
+fn delegate_hint_path(project_dir: &Path) -> std::path::PathBuf {
+    project_dir.join(".agents/shared/delegate_hints.jsonl")
+}
+
+fn already_hinted(project_dir: &Path, key: &str) -> bool {
+    let path = delegate_hint_path(project_dir);
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    content.lines().any(|l| l.trim() == key)
+}
+
+fn remember_hint(project_dir: &Path, key: &str) -> Result<()> {
+    let path = delegate_hint_path(project_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
+    writeln!(f, "{key}")?;
+    Ok(())
+}
 
 /// Lead assigns a task to a worker: claim + notify + relay.
 pub fn delegate_task(
@@ -29,7 +53,11 @@ pub fn delegate_task(
             agent_strengths::delegation_mismatch(&agents, lead, worker, task, description, Some(project_dir))
         {
             terminal::log_message(project_dir, "info", &hint);
-            let _ = meta::notify_agent_from(project_dir, lead, &hint, "agent-tui");
+            let hint_key = format!("{task}:{worker}");
+            if !already_hinted(project_dir, &hint_key) {
+                let _ = meta::notify_agent_from(project_dir, lead, &hint, "agent-tui");
+                let _ = remember_hint(project_dir, &hint_key);
+            }
         }
     }
     claims::claim_task(project_dir, worker, task)?;

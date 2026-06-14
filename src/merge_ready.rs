@@ -145,11 +145,7 @@ pub fn notify_lead_if_ready(project_dir: &Path, lead: &str) -> Result<bool> {
             let st = crate::batch_review::batch_review_status(project_dir, &batch_task)
                 .unwrap_or_else(|| "missing".into());
             if st == "failed" {
-                let body = format!(
-                    "【batch-review·failed】批次审查未通过（{batch_task}）。\
-                     ▶ Lead 行动：输出 agent-plan 派发修复 task，修复后 `agent-tui review` 重审。"
-                );
-                meta::notify_agent_from(project_dir, lead, &body, "agent-tui")?;
+                let _ = crate::batch_review::notify_failed_once(project_dir, lead, &batch_task)?;
             }
             return Ok(false);
         }

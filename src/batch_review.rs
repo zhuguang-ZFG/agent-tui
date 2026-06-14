@@ -17,6 +17,47 @@ fn dispatched_path(project_dir: &Path) -> PathBuf {
     project_dir.join(".agents/shared/batch_review_dispatched.jsonl")
 }
 
+fn failed_notified_path(project_dir: &Path) -> PathBuf {
+    project_dir.join(".agents/shared/batch_review_failed_notified.jsonl")
+}
+
+fn already_failed_notified(project_dir: &Path, batch_task: &str) -> bool {
+    let path = failed_notified_path(project_dir);
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    content.lines().any(|l| l.trim() == batch_task)
+}
+
+fn remember_failed_notified(project_dir: &Path, batch_task: &str) -> Result<()> {
+    let path = failed_notified_path(project_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
+    writeln!(f, "{batch_task}")?;
+    Ok(())
+}
+
+/// Notify Lead once per batch-review task when reviewer reports failed.
+pub fn notify_failed_once(project_dir: &Path, lead: &str, batch_task: &str) -> Result<bool> {
+    if already_failed_notified(project_dir, batch_task) {
+        return Ok(false);
+    }
+    let body = format!(
+        "【batch-review·failed】批次审查未通过（{batch_task}）。\
+         ▶ Lead 行动：输出 agent-plan 派发修复 task，修复后 `agent-tui review --force` 重审。"
+    );
+    meta::notify_agent_from(project_dir, lead, &body, "agent-tui")?;
+    remember_failed_notified(project_dir, batch_task)?;
+    terminal::log_message(
+        project_dir,
+        "warn",
+        &format!("batch review failed: 已通知 {lead}（{batch_task}）"),
+    );
+    Ok(true)
+}
+
 pub fn batch_review_enabled() -> bool {
     std::env::var("AGENT_TUI_BATCH_REVIEW")
         .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
@@ -140,9 +181,10 @@ pub fn dispatch_review_for_project(project_dir: &Path, batch_prefix: Option<&str
 }
 
 pub fn reset_dispatched(project_dir: &Path) -> Result<()> {
-    let path = dispatched_path(project_dir);
-    if path.is_file() {
-        fs::remove_file(path)?;
+    for path in [dispatched_path(project_dir), failed_notified_path(project_dir)] {
+        if path.is_file() {
+            fs::remove_file(path)?;
+        }
     }
     Ok(())
 }
@@ -157,5 +199,16 @@ mod tests {
         let b = batch_review_task_id(&["a".into(), "b".into()]);
         assert_eq!(a, b);
         assert!(a.contains("batch-review"));
+    }
+
+    #[test]
+    fn failed_notify_deduped() {
+        let dir = std::env::temp_dir().join(format!("batch-fail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".agents/shared")).unwrap();
+        let task = "batch-batch-review-deadbeef";
+        assert!(notify_failed_once(&dir, "cursor", task).unwrap());
+        assert!(!notify_failed_once(&dir, "cursor", task).unwrap());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -172,10 +172,7 @@ pub fn record_outcome(
     if !evolution_enabled() {
         return Ok(());
     }
-    if !matches!(
-        status,
-        "done" | "failed" | "blocked" | "review_failed" | "awaiting_review"
-    ) {
+    if !matches!(status, "done" | "failed" | "blocked" | "review_failed") {
         return Ok(());
     }
     let path = outcomes_path(project_dir);
