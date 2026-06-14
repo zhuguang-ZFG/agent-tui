@@ -42,6 +42,10 @@ agents:
     command: "opencode"
     role: "integrator"
     enabled: true
+  reasonix:
+    command: "reasonix"
+    role: "analyst"
+    enabled: true
 "#;
 
 const MINIMAL_AGENTS_YAML: &str = r#"# Minimal roster — agent-tui init --minimal

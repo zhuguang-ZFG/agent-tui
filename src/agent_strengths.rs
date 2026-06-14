@@ -152,6 +152,25 @@ fn builtin_profile(name: &str, role: &str) -> AgentProfile {
             ],
             avoid: vec!["核心业务逻辑", "UI 组件", "代替 Lead 续派"],
         },
+        "reasonix" => AgentProfile {
+            name: name.into(),
+            role: role.into(),
+            engine: "DeepSeek Reasonix",
+            strengths: vec![
+                "深度推理与分析",
+                "低成本批量任务",
+                "缓存命中率优化",
+                "代码语义索引",
+                "长上下文理解",
+            ],
+            best_for: vec![
+                "大规模代码分析与报告",
+                "批量文档生成与索引",
+                "成本敏感的迭代任务",
+                "ACP 协议集成",
+            ],
+            avoid: vec!["实时交互前端", "毫秒级响应场景", "Lead 编排"],
+        },
         _ => match role {
             "executor" => AgentProfile {
                 name: name.into(),
@@ -257,6 +276,7 @@ fn agent_bucket_scores(name: &str, role: &str) -> [i32; 5] {
         "cursor" => [0, 0, 0, 8, 2],
         "kilo" => [0, 3, 12, 0, 1],
         "opencode" => [0, 10, 2, 1, 3],
+        "reasonix" => [1, 5, 5, 8, 6],
         _ => match role {
             "frontend" => [10, 1, 0, 0, 2],
             "executor" => [1, 10, 2, 0, 1],

@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use regex::Regex;
 use serde::Deserialize;
 
-pub const PREFERRED_ORDER: &[&str] = &["claude", "codex", "mimo", "kimi", "cursor", "kilo", "opencode"];
+pub const PREFERRED_ORDER: &[&str] = &["claude", "codex", "mimo", "kimi", "cursor", "kilo", "opencode", "reasonix"];
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentsFile {
