@@ -530,5 +530,18 @@ fn windows_needs_cmd_wrapper(program: &str) -> bool {
     if program.contains('\\') || program.contains('/') {
         return false;
     }
-    matches!(program, "npx" | "npm" | "pnpm" | "yarn")
+    if matches!(program, "npx" | "npm" | "pnpm" | "yarn") {
+        return true;
+    }
+    // Check if a .cmd shim exists on PATH (npm/other CLIs generate both
+    // extensionless shell scripts and .cmd batch files; CreateProcessW
+    // cannot run the extensionless script directly).
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            if dir.join(format!("{program}.cmd")).is_file() {
+                return true;
+            }
+        }
+    }
+    false
 }
