@@ -15,6 +15,7 @@ mod conpty;
 mod dead_letter;
 mod delegation;
 mod delegation_stats;
+mod doctor_fix;
 mod event_timeline;
 mod events_ui;
 mod guide;
@@ -243,6 +244,9 @@ enum Commands {
     Doctor {
         #[arg(long)]
         project_dir: Option<PathBuf>,
+        /// 自动修复：init + worktree + sync-lead + agent CLI 预检
+        #[arg(long)]
+        fix: bool,
     },
     /// 打印速查表（只记 3 条命令）
     Guide {
@@ -702,11 +706,19 @@ fn run_command(cmd: Commands) -> Result<()> {
             )?;
             print!("{}", project_init::format_init_summary(&outcome));
         }
-        Commands::Doctor { project_dir } => {
-            let status = project_init::detect_project_or_cwd(project_dir);
-            print!("{}", project_init::format_doctor_report(&status));
-            if !status.ready_for_tui {
-                std::process::exit(1);
+        Commands::Doctor { project_dir, fix } => {
+            let dir = project_dir
+                .clone()
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            if fix {
+                let log = doctor_fix::doctor_fix(&dir)?;
+                print!("{}", log);
+            } else {
+                let status = project_init::detect_project_or_cwd(project_dir);
+                print!("{}", project_init::format_doctor_report(&status));
+                if !status.ready_for_tui {
+                    std::process::exit(1);
+                }
             }
         }
         Commands::Guide { project_dir } => {

@@ -41,6 +41,7 @@ pub struct AgentSpec {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AgentRoster {
     pub lead: Option<String>,
     pub agents: Vec<AgentSpec>,
@@ -167,6 +168,7 @@ pub fn load_agents(project: &Path) -> Result<Vec<AgentSpec>> {
     Ok(load_agent_roster(project)?.agents)
 }
 
+#[allow(dead_code)]
 pub fn load_agents_and_lead(project: &Path) -> Result<(Vec<AgentSpec>, String)> {
     let roster = load_agent_roster(project)?;
     let lead = resolve_lead_agent_from_roster(&roster);
@@ -174,6 +176,7 @@ pub fn load_agents_and_lead(project: &Path) -> Result<(Vec<AgentSpec>, String)> 
 }
 
 /// Primary coordinator: `AGENT_TUI_LEAD`, else explicit `lead:`, else `role: architect`, else `cursor`, else `claude`, else first.
+#[allow(dead_code)]
 pub fn resolve_lead_agent_from_roster(roster: &AgentRoster) -> String {
     resolve_lead_agent_with_config(&roster.agents, roster.lead.as_deref())
 }
