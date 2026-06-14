@@ -32,6 +32,7 @@ mod memory_fts;
 mod merge_ready;
 mod auto_pr;
 mod auto_route;
+mod plan_gen;
 mod merge;
 mod post_merge_smoke;
 mod meta;
@@ -254,6 +255,19 @@ enum Commands {
         #[arg(long)]
         project_dir: Option<PathBuf>,
         /// 仅预览，不写入文件
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// 智能拆解大任务为子任务计划（代码所有权派发）
+    Plan {
+        /// 任务名称
+        task: String,
+        /// 任务描述
+        #[arg(long, default_value = "")]
+        description: String,
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+        /// 仅预览，不实际委派
         #[arg(long)]
         dry_run: bool,
     },
@@ -735,6 +749,20 @@ fn run_command(cmd: Commands) -> Result<()> {
                 .clone()
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
             let log = auto_route::gen_routes(&dir, dry_run)?;
+            print!("{}", log);
+        }
+        Commands::Plan {
+            task,
+            description,
+            project_dir,
+            dry_run,
+        } => {
+            let dir = project_dir
+                .clone()
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            let agents = config::load_agents(&dir)?;
+            let lead = config::resolve_lead_agent(&agents);
+            let log = plan_gen::plan_and_dispatch(&dir, &task, &description, &lead, dry_run)?;
             print!("{}", log);
         }
         Commands::Guide { project_dir } => {
