@@ -876,6 +876,7 @@ pub fn run_all(project_dir: &Path) -> Result<()> {
     verify_lead_identity_sync(project_dir).context("lead identity sync")?;
     verify_relay_cursor_persist(project_dir).context("relay cursor persist")?;
     verify_blocked_escalation(project_dir).context("blocked advisor escalate")?;
+    crate::project_init::verify_init_scaffold().context("init scaffold")?;
     observer::verify_http_snapshot(project_dir).context("observer HTTP")?;
     observer::verify_sse_stream(project_dir).context("observer SSE")?;
     let snap = observer::build_snapshot(project_dir).context("observer snapshot")?;
@@ -910,6 +911,7 @@ pub fn run_all(project_dir: &Path) -> Result<()> {
     println!("  lead identity: sync-lead + orchestrator.mdc + LEAD.md ✓");
     println!("  relay persist: relay_cursor.json 重启恢复 ✓");
     println!("  blocked: max nudges → advisor 自动升级 ✓");
+    println!("  init scaffold: 任意目录 agent-tui init ✓");
     println!("  relay: PTY 未就绪时不推进游标 ✓");
     println!("  dedupe: plan 指纹重启后仍有效 ✓");
     println!("  observer: /api/snapshot + SSE stream ✓");

@@ -18,6 +18,7 @@ mod mailbox_relay;
 mod memory_fts;
 mod meta;
 mod plan_inbox;
+mod project_init;
 mod observer;
 mod pane;
 mod relay;
@@ -178,6 +179,28 @@ enum Commands {
         #[arg(long)]
         project_dir: Option<PathBuf>,
     },
+    /// 在当前/指定项目脚手架 `.agents/`（agents.yaml + COORDINATION + sync-lead）
+    Init {
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+        /// 覆盖已有 agents.yaml / COORDINATION.md
+        #[arg(long)]
+        force: bool,
+        /// 不创建 worktree 联接（多 Agent 共用项目根 cwd）
+        #[arg(long)]
+        no_link_worktrees: bool,
+        /// 跳过 sync-lead
+        #[arg(long)]
+        no_sync_lead: bool,
+        /// 最小名册：cursor + codex
+        #[arg(long)]
+        minimal: bool,
+    },
+    /// 检测项目是否已配置 agent-tui（无需 agents.yaml 也可运行）
+    Doctor {
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -187,7 +210,16 @@ fn main() -> Result<()> {
         return run_command(cmd);
     }
 
-    let project_dir = config::resolve_project_dir(cli.project_dir)?;
+    let project_dir = match config::resolve_project_dir(cli.project_dir.clone()) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("{e:#}");
+            eprintln!(
+                "\n提示: 在新项目根目录运行 `agent-tui init`，或 `agent-tui init --project-dir <路径>`"
+            );
+            std::process::exit(1);
+        }
+    };
 
     if cli.check {
         let agents = config::load_agents(&project_dir)?;
@@ -503,6 +535,35 @@ fn run_command(cmd: Commands) -> Result<()> {
                 "Playbook → {}",
                 project_dir.join(".agents/LEAD.md").display()
             );
+        }
+        Commands::Init {
+            project_dir,
+            force,
+            no_link_worktrees,
+            no_sync_lead,
+            minimal,
+        } => {
+            let dir = project_dir
+                .map(|p| p.canonicalize().unwrap_or(p))
+                .or_else(|| std::env::current_dir().ok())
+                .context("need --project-dir or cwd")?;
+            let outcome = project_init::init_project(
+                &dir,
+                &project_init::InitOptions {
+                    force,
+                    link_worktrees: !no_link_worktrees,
+                    sync_lead: !no_sync_lead,
+                    minimal,
+                },
+            )?;
+            print!("{}", project_init::format_init_summary(&outcome));
+        }
+        Commands::Doctor { project_dir } => {
+            let status = project_init::detect_project_or_cwd(project_dir);
+            print!("{}", project_init::format_doctor_report(&status));
+            if !status.ready_for_tui {
+                std::process::exit(1);
+            }
         }
     }
     Ok(())

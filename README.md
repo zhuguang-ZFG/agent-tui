@@ -25,6 +25,10 @@ Copy-Item -Force target\release\agent-tui.exe .\bin\
 ### 启动
 
 ```powershell
+# 新项目：一键脚手架
+agent-tui init
+agent-tui doctor
+
 agent-tui --project-dir D:\your-project
 # 或配合 agents-complete
 .\your-project\.agents\clideckctl.cmd rust
@@ -70,6 +74,7 @@ agent-tui serve --project-dir D:\your-project
 
 ```powershell
 agent-tui notify|broadcast|delegate|report ...
+agent-tui init|doctor|sync-lead
 agent-tui plan-submit|plan-dry-run ...
 agent-tui tasks|events|memory-search|memory-reindex
 agent-tui verify-loop|verify-live
