@@ -28,6 +28,7 @@ pub enum OpsVerb {
     ResetBatch,
     SyncLead,
     Doctor,
+    DoctorFix,
     Evolve,
     ProjectMap,
 }
@@ -39,6 +40,7 @@ pub const OPS_CATALOG: &[(&str, &str)] = &[
     ("!next", "当前阶段与下一步"),
     ("!guide", "速查表"),
     ("!doctor", "项目体检与能力清单"),
+    ("!doctor --fix", "体检 + 自动修复"),
     ("!pr", "开 GitHub PR（需 gh）"),
     ("!pr-merge", "合并当前 PR"),
     ("!pr-status", "查询 PR 状态"),
@@ -107,7 +109,14 @@ pub fn parse_ops_line(raw: &str) -> Option<OpsVerb> {
         "!clean" | "!clean-verify" | "!清理" => Some(OpsVerb::CleanVerify),
         "!reset-batch" | "!新批次" | "!新sprint" => Some(OpsVerb::ResetBatch),
         "!sync-lead" | "!同步lead" => Some(OpsVerb::SyncLead),
-        "!doctor" | "!体检" => Some(OpsVerb::Doctor),
+        "!doctor" | "!体检" => {
+            if rest.contains("--fix") || rest.contains("修复") {
+                Some(OpsVerb::DoctorFix)
+            } else {
+                Some(OpsVerb::Doctor)
+            }
+        }
+        "!fix" | "!修复" => Some(OpsVerb::DoctorFix),
         "!evolve" | "!进化" => Some(OpsVerb::Evolve),
         "!map" | "!project-map" | "!项目地图" => Some(OpsVerb::ProjectMap),
         _ => None,
@@ -232,6 +241,9 @@ pub fn execute(project_dir: &Path, lead: &str, verb: OpsVerb) -> Result<String> 
             let status = project_init::detect_project_or_cwd(Some(project_dir.to_path_buf()));
             Ok(project_init::format_doctor_report(&status))
         }
+        OpsVerb::DoctorFix => {
+            crate::doctor_fix::doctor_fix(project_dir)
+        }
         OpsVerb::Evolve => {
             let n = delegation_stats::evolve_project(project_dir)?;
             Ok(format!("已更新 STRENGTHS 历史表现（{n} 条委派记录）"))
@@ -257,6 +269,9 @@ mod tests {
             Some(OpsVerb::Review { force: true })
         );
         assert_eq!(parse_ops_line("!任务 x"), None);
+        assert_eq!(parse_ops_line("!doctor --fix"), Some(OpsVerb::DoctorFix));
+        assert_eq!(parse_ops_line("!fix"), Some(OpsVerb::DoctorFix));
+        assert_eq!(parse_ops_line("!doctor"), Some(OpsVerb::Doctor));
     }
 
     #[test]

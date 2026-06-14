@@ -9,19 +9,29 @@ pub fn cheat_sheet(project_dir: Option<&Path>) -> String {
         .map(|p| format!(" --project-dir {}", p.display()))
         .unwrap_or_else(|| " --project-dir <项目根>".into());
 
-    let lead = project_dir
-        .and_then(|p| config::load_agents(p).ok())
-        .map(|agents| config::resolve_lead_agent(&agents))
+    let agents = project_dir.and_then(|p| config::load_agents(p).ok());
+    let lead = agents
+        .as_ref()
+        .map(|a| config::resolve_lead_agent(a))
         .unwrap_or_else(|| "cursor".into());
+    let agent_count = agents.as_ref().map(|a| a.len()).unwrap_or(0);
+    let layout_desc = match agent_count {
+        0 => "（未检测到 Agent）".into(),
+        1 => "单格全屏".into(),
+        2 => "左右两栏".into(),
+        3 => "三列并排".into(),
+        4 => "2×2 四宫格".into(),
+        n => format!("上 3 + 下 {} 网格", n - 3),
+    };
 
     format!(
         r#"agent-tui 速查（只记 1 条）
 
   ★ agent-tui{project_hint}
     或 agent-tui up{project_hint}
-    → 未 init 会自动初始化，默认四宫格启动全部 Agent
+    → 未 init 会自动初始化，{agent_count} Agent 自适应布局（{layout_desc}）
 
-  单格全屏：agent-tui --solo  |  F2 切换四宫格/全屏
+  单格全屏：agent-tui --solo  |  F2 切换网格/全屏
 
   忘了操作？TUI 内 Ctrl+G 速查  |  Ctrl+N 当前进度  |  Ctrl+I 留言板 !doctor 体检
 
@@ -70,6 +80,7 @@ TUI 自动完成（无需手动）：
   !reset-batch            → 新 sprint 重置指纹
   !sync-lead              → 刷新 Lead 规则
   !doctor                 → 项目体检
+  !doctor --fix            → 体检 + 自动修复
   !map                    → 生成 PROJECT_MAP.md
   !next / !guide          → 打开进度 / 速查面板
   @mimo 消息               → 定向通知某 Agent
@@ -95,7 +106,7 @@ TUI 自动完成（无需手动）：
 快捷键（TUI 内）
 
   Ctrl+1~8  聚焦 Agent    Ctrl+I  留言板
-  F5        重启失败格子    F2  四宫格/单人
+  F5        重启失败格子    F2  网格/单人
   Ctrl+T    任务看板（按批次分组，Space 折叠）
   Ctrl+E    事件时间线
   Ctrl+G    速查            Ctrl+N  当前进度
