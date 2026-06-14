@@ -239,6 +239,12 @@ fn handle_request(project_dir: &Path, request: Request) -> Result<()> {
             let response = Response::from_string(body).with_header(json_header());
             request.respond(response)?;
         }
+        (&Method::Get, "/api/memory") => {
+            let mem = crate::shared_memory::build_shared_memory(project_dir)?;
+            let body = serde_json::to_string_pretty(&mem)?;
+            let response = Response::from_string(body).with_header(json_header());
+            request.respond(response)?;
+        }
         (&Method::Get, path) if path.starts_with("/api/stream") => {
             let once = request.url().contains("once=1");
             let reader = SseReader::new(

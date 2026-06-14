@@ -88,6 +88,7 @@
   <div class="grid">
     <section><h2>Agents</h2><div class="body" id="agents"></div></section>
     <section><h2>Tasks</h2><div class="body" id="tasks"></div></section>
+    <section><h2>Memory</h2><div class="body" id="memory"></div></section>
     <section><h2>Retry queue</h2><div class="body" id="retry"></div></section>
     <section><h2>Dead letters</h2><div class="body" id="dead"></div></section>
     <section style="grid-column: 1 / -1"><h2>Timeline</h2><div class="body wide" id="timeline"></div></section>
@@ -119,6 +120,37 @@
     function renderDead(list) {
       if (!list.length) return '<p class="empty">(无)</p>';
       return list.map(r => `<div>${pill(r.status)} ${esc(r.worker)} / ${esc(r.task)} attempt=${r.attempt}</div>`).join('');
+    }
+    let memData = null;
+    function renderMemory(m) {
+      if (!m || !m.agents || !m.agents.length) return '<p class="empty">(无记忆数据)</p>';
+      let html = '<table><tr><th>Agent</th><th>角色</th><th>任务</th><th>持久</th><th>检查点</th></tr>';
+      for (const a of m.agents) {
+        html += `<tr><td>${esc(a.name)}</td><td>${esc(a.role)}</td><td>${a.assignment_count}</td><td>${a.durable_count}</td><td>${a.checkpoint_exists ? '✓' : '—'}</td></tr>`;
+      }
+      html += '</table>';
+      if (m.stats) {
+        html += `<div style="margin-top:0.5rem;color:var(--muted);font-size:0.75rem;">总条目: ${m.stats.total_entries} | 持久: ${m.stats.total_durable}</div>`;
+      }
+      // Show recent durable entries
+      const durable = (m.entries || []).filter(e => e.source === 'durable').slice(0, 5);
+      if (durable.length) {
+        html += '<div style="margin-top:0.5rem;font-size:0.78rem;"><strong>最近知识条目:</strong>';
+        for (const e of durable) {
+          html += `<div style="color:var(--muted);">[${esc(e.agent)}] ${esc(e.content)}</div>`;
+        }
+        html += '</div>';
+      }
+      return html;
+    }
+    async function fetchMemory() {
+      try {
+        const res = await fetch('/api/memory');
+        if (res.ok) {
+          memData = await res.json();
+          document.getElementById('memory').innerHTML = renderMemory(memData);
+        }
+      } catch (_) {}
     }
     function applySnapshot(s) {
       document.getElementById('err').style.display = 'none';
@@ -154,11 +186,12 @@
     if (typeof EventSource !== 'undefined') {
       const es = new EventSource('/api/stream');
       es.addEventListener('snapshot', (ev) => {
-        try { applySnapshot(JSON.parse(ev.data)); } catch (_) { refresh(); }
+        try { applySnapshot(JSON.parse(ev.data)); fetchMemory(); } catch (_) { refresh(); }
       });
-      es.onerror = () => { es.close(); refresh(); setInterval(refresh, 3000); };
+      es.onerror = () => { es.close(); refresh(); fetchMemory(); setInterval(refresh, 3000); };
     } else {
       refresh();
+      fetchMemory();
       setInterval(refresh, 3000);
     }
   </script>

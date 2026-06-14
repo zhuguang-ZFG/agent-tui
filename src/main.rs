@@ -33,6 +33,7 @@ mod merge_ready;
 mod auto_pr;
 mod auto_route;
 mod plan_gen;
+mod shared_memory;
 mod merge;
 mod post_merge_smoke;
 mod meta;
@@ -270,6 +271,11 @@ enum Commands {
         /// 仅预览，不实际委派
         #[arg(long)]
         dry_run: bool,
+    },
+    /// 跨 Agent 记忆总览（聚合所有 agent 的 MEMORY/checkpoint/notes）
+    Memory {
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
     },
     /// 打印速查表（只记 3 条命令）
     Guide {
@@ -763,6 +769,13 @@ fn run_command(cmd: Commands) -> Result<()> {
             let agents = config::load_agents(&dir)?;
             let lead = config::resolve_lead_agent(&agents);
             let log = plan_gen::plan_and_dispatch(&dir, &task, &description, &lead, dry_run)?;
+            print!("{}", log);
+        }
+        Commands::Memory { project_dir } => {
+            let dir = project_dir
+                .clone()
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            let log = shared_memory::show_memory(&dir)?;
             print!("{}", log);
         }
         Commands::Guide { project_dir } => {
