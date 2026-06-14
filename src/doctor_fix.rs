@@ -274,7 +274,19 @@ pub fn doctor_fix(project_dir: &Path) -> Result<String> {
     let checks = check_all_agents(project_dir)?;
     log.push_str(&format_check_report(&checks));
 
-    // Step 5: summary
+    // Step 5: auto-generate routing if missing or outdated
+    let routing_path = project_dir.join(".agents/routing.yaml");
+    if !routing_path.is_file() {
+        log.push_str("► 生成代码图谱路由...\n");
+        match crate::auto_route::gen_routes(project_dir, false) {
+            Ok(r) => log.push_str(&r),
+            Err(e) => log.push_str(&format!("  ⚠ 路由生成失败: {e}\n")),
+        }
+    } else {
+        log.push_str("✓ routing.yaml 已存在（如需更新，运行 agent-tui gen-routes）\n");
+    }
+
+    // Step 6: summary
     let all_ok = checks.iter().all(|c| c.on_path);
     let issues: Vec<_> = checks.iter().filter(|c| !c.on_path).collect();
     if all_ok {

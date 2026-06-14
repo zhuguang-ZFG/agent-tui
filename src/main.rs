@@ -31,6 +31,7 @@ mod mailbox_relay;
 mod memory_fts;
 mod merge_ready;
 mod auto_pr;
+mod auto_route;
 mod merge;
 mod post_merge_smoke;
 mod meta;
@@ -247,6 +248,14 @@ enum Commands {
         /// 自动修复：init + worktree + sync-lead + agent CLI 预检
         #[arg(long)]
         fix: bool,
+    },
+    /// 扫描项目结构，自动生成 routing.yaml（代码图谱路由）
+    GenRoutes {
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+        /// 仅预览，不写入文件
+        #[arg(long)]
+        dry_run: bool,
     },
     /// 打印速查表（只记 3 条命令）
     Guide {
@@ -720,6 +729,13 @@ fn run_command(cmd: Commands) -> Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+        Commands::GenRoutes { project_dir, dry_run } => {
+            let dir = project_dir
+                .clone()
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            let log = auto_route::gen_routes(&dir, dry_run)?;
+            print!("{}", log);
         }
         Commands::Guide { project_dir } => {
             let dir = project_init::detect_project_or_cwd(project_dir).project_dir;
