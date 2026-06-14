@@ -454,16 +454,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exponential_backoff_doubles() {
+    fn backoff_modes() {
         std::env::set_var("AGENT_TUI_RETRY_BACKOFF", "exponential");
         std::env::set_var("AGENT_TUI_RETRY_COOLDOWN_SECS", "10");
         assert_eq!(compute_cooldown_secs(1), 10);
         assert_eq!(compute_cooldown_secs(2), 20);
         assert_eq!(compute_cooldown_secs(3), 40);
-    }
 
-    #[test]
-    fn fixed_backoff_uses_base() {
         std::env::set_var("AGENT_TUI_RETRY_BACKOFF", "fixed");
         std::env::set_var("AGENT_TUI_RETRY_COOLDOWN_SECS", "30");
         assert_eq!(compute_cooldown_secs(1), 30);

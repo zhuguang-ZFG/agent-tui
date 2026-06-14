@@ -11,6 +11,7 @@ use crate::config::{load_agents, resolve_lead_agent};
 use crate::dead_letter;
 use crate::delegation;
 use crate::lead_followup;
+use crate::lead_identity;
 use crate::lead_watch;
 use crate::mailbox;
 use crate::meta;
@@ -665,6 +666,101 @@ pub fn verify_persistent_plan_dedupe(project_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Cyclic depends_on must not delegate any worker.
+pub fn verify_dag_cycle_rejected(project_dir: &Path) -> Result<()> {
+    let agents = load_agents(project_dir)?;
+    let lead = resolve_lead_agent(&agents);
+    let task_a = unique_task("cycle-a");
+    let task_b = unique_task("cycle-b");
+    let items = vec![
+        lead_watch::PlanItem {
+            worker: "codex".into(),
+            task: task_a.clone(),
+            description: "环检测 A".into(),
+            depends_on: vec![task_b.clone()],
+        },
+        lead_watch::PlanItem {
+            worker: "kimi".into(),
+            task: task_b.clone(),
+            description: "环检测 B".into(),
+            depends_on: vec![task_a.clone()],
+        },
+    ];
+    let dispatched = lead_watch::dispatch_plan_items(project_dir, &lead, items, "verify-cycle");
+    if dispatched != 0 {
+        bail!("DAG cycle: expected 0 dispatch, got {dispatched}");
+    }
+    let entries = mailbox::load_entries(project_dir, 80);
+    for task in [&task_a, &task_b] {
+        if entries.iter().any(|e| {
+            e.kind == "delegate" && e.task.as_deref() == Some(task.as_str())
+        }) {
+            bail!("DAG cycle: task {task} should not be delegated");
+        }
+    }
+    Ok(())
+}
+
+/// sync-lead artifacts exist and contain orchestrator identity markers.
+pub fn verify_lead_identity_sync(project_dir: &Path) -> Result<()> {
+    let agents = load_agents(project_dir)?;
+    let lead = resolve_lead_agent(&agents);
+    let spec = agents
+        .iter()
+        .find(|a| a.name.eq_ignore_ascii_case(&lead))
+        .ok_or_else(|| anyhow::anyhow!("lead {lead} missing from agents.yaml"))?;
+
+    lead_identity::sync_lead_context(project_dir, &lead, &spec.worktree)?;
+    agent_memory::refresh_lead_identity(project_dir, &lead)?;
+
+    let playbook = project_dir.join(".agents/LEAD.md");
+    let rules = spec
+        .worktree
+        .join(".cursor/rules/agent-tui-orchestrator.mdc");
+    let stub = spec.worktree.join("AGENTS-agent-tui.md");
+
+    for (label, path) in [
+        ("LEAD.md", &playbook),
+        ("orchestrator.mdc", &rules),
+        ("AGENTS-agent-tui.md", &stub),
+    ] {
+        let body = std::fs::read_to_string(path)
+            .with_context(|| format!("read {label} {}", path.display()))?;
+        if !body.contains("Lead") && !body.contains("Orchestrator") {
+            bail!("{label} missing Lead/Orchestrator identity");
+        }
+        if !body.contains("agent-plan") {
+            bail!("{label} missing agent-plan guidance");
+        }
+    }
+
+    let rules_body = std::fs::read_to_string(&rules)?;
+    if !rules_body.contains("alwaysApply: true") {
+        bail!("orchestrator.mdc missing alwaysApply");
+    }
+    if !rules_body.contains(&lead) {
+        bail!("orchestrator.mdc missing lead name {lead}");
+    }
+
+    let agents_md = spec.worktree.join("AGENTS.md");
+    if agents_md.is_file() {
+        let content = std::fs::read_to_string(&agents_md)?;
+        if !content.contains("agent-tui:lead") {
+            bail!("AGENTS.md missing agent-tui:lead pointer");
+        }
+    }
+
+    let mem = agent_memory::memory_md_path(project_dir, &lead);
+    if mem.is_file() {
+        let mem_body = std::fs::read_to_string(&mem)?;
+        if !mem_body.contains("Lead") && !mem_body.contains("Orchestrator") {
+            bail!("lead MEMORY.md missing identity rules");
+        }
+    }
+
+    Ok(())
+}
+
 pub fn run_all(project_dir: &Path) -> Result<()> {
     verify_parsers().context("parser checks")?;
     verify_relay_cursor_hold().context("relay cursor hold")?;
@@ -674,6 +770,8 @@ pub fn run_all(project_dir: &Path) -> Result<()> {
     let dag_outcome = verify_dag_chain(project_dir).context("DAG chain")?;
     verify_lead_followup_chain(project_dir).context("lead followup chain")?;
     verify_lead_transcript_followup_chain(project_dir).context("lead transcript followup")?;
+    verify_dag_cycle_rejected(project_dir).context("DAG cycle rejection")?;
+    verify_lead_identity_sync(project_dir).context("lead identity sync")?;
     observer::verify_http_snapshot(project_dir).context("observer HTTP")?;
     observer::verify_sse_stream(project_dir).context("observer SSE")?;
     let snap = observer::build_snapshot(project_dir).context("observer snapshot")?;
@@ -704,6 +802,8 @@ pub fn run_all(project_dir: &Path) -> Result<()> {
     );
     println!("  lead followup: 回执 pending → 续派 plan 清除 ✓");
     println!("  lead transcript: tail 扫描 agent-plan → 自动派发 ✓");
+    println!("  DAG cycle: 环依赖拒绝委派 ✓");
+    println!("  lead identity: sync-lead + orchestrator.mdc + LEAD.md ✓");
     println!("  relay: PTY 未就绪时不推进游标 ✓");
     println!("  dedupe: plan 指纹重启后仍有效 ✓");
     println!("  observer: /api/snapshot + SSE stream ✓");

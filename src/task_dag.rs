@@ -1,11 +1,11 @@
 //! Task dependency scheduling for agent-plan items (`depends_on`).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::lead_watch::PlanItem;
@@ -124,6 +124,78 @@ fn normalize_completed(completed: &HashSet<String>) -> HashSet<String> {
         .collect()
 }
 
+/// Return one cycle path if `depends_on` forms a loop (e.g. A→B→A).
+pub fn find_dependency_cycle(plans: &[PlanItem]) -> Option<Vec<String>> {
+    let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+    for p in plans {
+        adj.entry(p.task.clone()).or_default();
+        for d in &p.depends_on {
+            let d = d.trim();
+            if d.is_empty() {
+                continue;
+            }
+            adj.entry(p.task.clone()).or_default().push(d.to_string());
+            adj.entry(d.to_string()).or_default();
+        }
+    }
+
+    #[derive(Copy, Clone, Eq, PartialEq)]
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+
+    let mut color: HashMap<String, Color> = adj.keys().map(|k| (k.clone(), Color::White)).collect();
+    let mut stack: Vec<String> = Vec::new();
+
+    fn dfs(
+        node: &str,
+        adj: &HashMap<String, Vec<String>>,
+        color: &mut HashMap<String, Color>,
+        stack: &mut Vec<String>,
+    ) -> Option<Vec<String>> {
+        color.insert(node.to_string(), Color::Gray);
+        stack.push(node.to_string());
+        for dep in adj.get(node).into_iter().flatten() {
+            match color.get(dep.as_str()).copied().unwrap_or(Color::White) {
+                Color::Gray => {
+                    if let Some(pos) = stack.iter().position(|t| t == dep) {
+                        let mut cycle = stack[pos..].to_vec();
+                        cycle.push(dep.clone());
+                        return Some(cycle);
+                    }
+                }
+                Color::White => {
+                    if let Some(c) = dfs(dep, adj, color, stack) {
+                        return Some(c);
+                    }
+                }
+                Color::Black => {}
+            }
+        }
+        stack.pop();
+        color.insert(node.to_string(), Color::Black);
+        None
+    }
+
+    for node in adj.keys().cloned().collect::<Vec<_>>() {
+        if color.get(&node).copied().unwrap_or(Color::White) == Color::White {
+            if let Some(c) = dfs(&node, &adj, &mut color, &mut stack) {
+                return Some(c);
+            }
+        }
+    }
+    None
+}
+
+pub fn validate_no_dependency_cycles(plans: &[PlanItem]) -> Result<()> {
+    if let Some(cycle) = find_dependency_cycle(plans) {
+        bail!("dependency cycle detected: {}", cycle.join(" → "));
+    }
+    Ok(())
+}
+
 /// Split plans into ready vs blocked; merge with persisted pending queue.
 pub fn schedule_plans(
     project_dir: &Path,
@@ -143,6 +215,8 @@ pub fn schedule_plans(
         pending.push_back(item);
     }
 
+    let merged: Vec<PlanItem> = pending.iter().cloned().collect();
+    validate_no_dependency_cycles(&merged)?;
     let mut ready = Vec::new();
     let mut still_pending = Vec::new();
     let mut progress = true;
@@ -189,5 +263,25 @@ mod tests {
         assert!(!deps_satisfied(&item, &done));
         done.insert("api".into());
         assert!(deps_satisfied(&item, &done));
+    }
+
+    #[test]
+    fn detects_simple_cycle() {
+        let plans = vec![
+            PlanItem {
+                worker: "codex".into(),
+                task: "a".into(),
+                description: String::new(),
+                depends_on: vec!["b".into()],
+            },
+            PlanItem {
+                worker: "kimi".into(),
+                task: "b".into(),
+                description: String::new(),
+                depends_on: vec!["a".into()],
+            },
+        ];
+        assert!(find_dependency_cycle(&plans).is_some());
+        assert!(validate_no_dependency_cycles(&plans).is_err());
     }
 }
