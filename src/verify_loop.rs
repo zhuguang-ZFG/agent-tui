@@ -415,7 +415,7 @@ pub fn verify_failed_retry_chain(project_dir: &Path) -> Result<RetryVerifyOutcom
 
     Ok(RetryVerifyOutcome {
         task,
-        failed_worker: failed_worker.into(),
+        failed_worker,
         retry_worker: expected_retry_worker,
         dead_letter_attempt: dl.attempt,
         retries_executed: retries,

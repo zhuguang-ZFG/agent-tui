@@ -84,8 +84,12 @@ TUI 自动完成（无需手动）：
 ────────────────────────────────────────
 偶尔才用的 CLI（开发/CI）
 
-  agent-tui map{project_hint}       生成 PROJECT_MAP.md
-  agent-tui verify-loop{project_hint}  闭环自检
+  agent-tui doctor --fix{project_hint}  一键预检 + 自动修复
+  agent-tui gen-routes{project_hint}    扫描代码结构自动生成路由
+  agent-tui plan <task>{project_hint}   智能拆解大任务为子任务计划
+  agent-tui memory{project_hint}        跨 Agent 记忆总览
+  agent-tui map{project_hint}           生成 PROJECT_MAP.md
+  agent-tui verify-loop{project_hint}   闭环自检
 
 ────────────────────────────────────────
 快捷键（TUI 内）

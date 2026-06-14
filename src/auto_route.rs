@@ -184,7 +184,7 @@ fn scan_dirs(
 }
 
 fn scan_extensions(
-    root: &Path,
+    _root: &Path,
     dir: &Path,
     role_keywords: &mut BTreeMap<String, BTreeSet<String>>,
     depth: usize,
@@ -202,7 +202,7 @@ fn scan_extensions(
         if path.is_dir() {
             let name = entry.file_name().to_string_lossy().to_lowercase();
             if !is_skip_dir(&name) {
-                scan_extensions(root, &path, role_keywords, depth + 1)?;
+                scan_extensions(_root, &path, role_keywords, depth + 1)?;
             }
         } else if path.is_file() {
             if let Some(ext) = path.extension() {
