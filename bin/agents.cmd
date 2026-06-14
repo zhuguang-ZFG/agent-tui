@@ -5,11 +5,11 @@ set "BIN=%~dp0..\target\release\agent-tui.exe"
 if not exist "%BIN%" set "BIN=%~dp0agent-tui.exe"
 if not exist "%BIN%" set "BIN=%~dp0..\target\debug\agent-tui.exe"
 
-rem Default: 4-pane grid. Use "agents solo" for single-agent fullscreen.
-set "EXTRA=--grid"
+rem Default: 4-pane grid + all enabled agents. Use "agents solo" for single-agent fullscreen.
+set "EXTRA="
 
 if /i "%~1"=="solo" (
-    set "EXTRA="
+    set "EXTRA=--solo"
     shift
 )
 if /i "%~1"=="grid" shift

@@ -10,6 +10,8 @@ use crate::agent_memory;
 use crate::claims;
 use crate::config::{load_agents, resolve_lead_agent, sync_lead_coordination_rules, AgentSpec};
 use crate::health::{self, HealthState};
+use crate::confirm_panel::ConfirmPanel;
+use crate::help_panel::HelpPanel;
 use crate::inbox_ui::InboxPanel;
 use crate::events_ui::EventsPanel;
 use crate::lead_followup;
@@ -22,14 +24,21 @@ use crate::relay::{self, RelayConfig, RelayState};
 use crate::report_watch::{self, ReportWatchState};
 use crate::tasks_ui::TasksPanel;
 use crate::terminal;
+use crate::workflow_phase;
+use crate::pr_lifecycle;
+use crate::ops;
 
 const MAX_PANES: usize = 8;
 const SPAWN_STAGGER_MS: u64 = 1000;
 const PTY_RESIZE_WARMUP: Duration = Duration::from_secs(5);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(2);
 const META_INTERVAL: Duration = Duration::from_secs(5);
+const PR_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const RESTART_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_RESTARTS: u32 = 3;
+
+const MAX_SPAWN_RETRIES: u32 = 2;
+const SPAWN_RETRY_DELAY: Duration = Duration::from_secs(3);
 
 struct PendingSpawn {
     rx: Receiver<(usize, Result<AgentPane, String>)>,
@@ -43,6 +52,9 @@ pub struct App {
     pub panes: Vec<Option<AgentPane>>,
     pub focus: usize,
     pub status: String,
+    pub workflow_badge: String,
+    pub workflow_phase: workflow_phase::Phase,
+    pub workflow_hint: String,
     pub should_quit: bool,
     pub dirty: bool,
     pub terminal_rows: u16,
@@ -56,6 +68,8 @@ pub struct App {
     pub inbox: InboxPanel,
     pub tasks: TasksPanel,
     pub events: EventsPanel,
+    pub help: HelpPanel,
+    pub confirm: ConfirmPanel,
     event_ack_lines: Vec<usize>,
     notify_events: Vec<meta::NotifyEvent>,
     coord_events: Vec<CoordEvent>,
@@ -68,7 +82,11 @@ pub struct App {
     spawn_finished_at: Option<Instant>,
     last_health_check: Instant,
     last_meta_refresh: Instant,
+    last_pr_poll: Instant,
     pending_spawn: Option<PendingSpawn>,
+    spawn_setup_done: bool,
+    spawn_retry_round: u32,
+    spawn_retry_at: Option<(Instant, Vec<usize>)>,
 }
 
 impl App {
@@ -76,6 +94,8 @@ impl App {
         let agents = load_agents(&project_dir).unwrap_or_default();
         let lead_agent = resolve_lead_agent(&agents);
         let pane_slots = agents.len().clamp(1, MAX_PANES);
+        let wf = workflow_phase::evaluate(&project_dir);
+        let lead_watch = LeadWatchState::new(&project_dir, &lead_agent);
         let mut app = Self {
             project_dir: project_dir.clone(),
             agents,
@@ -83,11 +103,14 @@ impl App {
             panes: (0..pane_slots).map(|_| None).collect(),
             focus: 0,
             status: String::from("就绪"),
+            workflow_badge: workflow_phase::short_label_from(&wf),
+            workflow_phase: wf.phase,
+            workflow_hint: workflow_phase::action_hint(&wf, 48),
             should_quit: false,
             dirty: true,
             terminal_rows: 24,
             terminal_cols: 80,
-            fullscreen: Some(0),
+            fullscreen: None,
             inbox_line: meta::inbox_snippet(&project_dir, 2),
             health: Vec::new(),
             agent_meta: Vec::new(),
@@ -95,22 +118,61 @@ impl App {
             inbox: InboxPanel::closed(),
             tasks: TasksPanel::closed(),
             events: EventsPanel::closed(),
+            help: HelpPanel::closed(),
+            confirm: ConfirmPanel::closed(),
             event_ack_lines: Vec::new(),
             notify_events: Vec::new(),
             coord_events: Vec::new(),
             relay: RelayState::new(&project_dir, 0),
             relay_config: RelayConfig::from_env(),
-            lead_watch: LeadWatchState::new(&project_dir),
+            lead_watch,
             report_watch: ReportWatchState::new(&project_dir),
             restart_counts: Vec::new(),
             last_restart_at: Vec::new(),
             spawn_finished_at: None,
             last_health_check: Instant::now(),
             last_meta_refresh: Instant::now(),
+            last_pr_poll: Instant::now(),
             pending_spawn: None,
+            spawn_setup_done: false,
+            spawn_retry_round: 0,
+            spawn_retry_at: None,
         };
         app.init_tracking_vectors();
         Ok(app)
+    }
+
+    pub fn spawn_progress(&self) -> Option<(usize, usize)> {
+        self.pending_spawn
+            .as_ref()
+            .map(|p| (p.done, p.total))
+    }
+
+    pub fn agents_alive_count(&self) -> usize {
+        self.panes.iter().filter(|p| p.is_some()).count()
+    }
+
+    pub fn spawn_retry_countdown_secs(&self) -> Option<u64> {
+        let (at, _) = self.spawn_retry_at.as_ref()?;
+        let now = Instant::now();
+        if now >= *at {
+            return Some(0);
+        }
+        Some(at.duration_since(now).as_secs().saturating_add(1))
+    }
+
+    pub fn focused_pane_needs_restart(&self) -> bool {
+        if self.panes.get(self.focus).and_then(|p| p.as_ref()).is_none() {
+            return true;
+        }
+        matches!(self.health_state(self.focus), HealthState::Dead(_))
+    }
+
+    fn refresh_workflow_ui(&mut self) {
+        let snap = workflow_phase::evaluate(&self.project_dir);
+        self.workflow_phase = snap.phase;
+        self.workflow_badge = workflow_phase::short_label_from(&snap);
+        self.workflow_hint = workflow_phase::action_hint(&snap, 48);
     }
 
     pub fn init_tracking_vectors(&mut self) {
@@ -151,10 +213,12 @@ impl App {
             .collect();
     }
 
+    #[allow(dead_code)]
     fn agent_names(&self) -> Vec<String> {
         self.agents.iter().map(|a| a.name.clone()).collect()
     }
 
+    #[allow(dead_code)]
     fn dispatch_new_coord_events(&mut self) {
         let names = self.agent_names();
         self.coord_events = meta::load_coord_events(&self.project_dir);
@@ -263,10 +327,107 @@ impl App {
         drop(tx);
     }
 
+    fn queue_spawn_indices(&mut self, indices: &[usize]) {
+        if indices.is_empty() {
+            return;
+        }
+        let count = self.panes.len();
+        let (per_rows, per_cols) =
+            estimate_pane_size(self.terminal_rows, self.terminal_cols, count);
+        let (tx, rx) = mpsc::channel();
+        let n = indices.len();
+        self.status = format!("正在重试启动 {n} 个 Agent…");
+        self.pending_spawn = Some(PendingSpawn {
+            rx,
+            total: n,
+            done: 0,
+        });
+        self.dirty = true;
+
+        for (attempt, &i) in indices.iter().enumerate() {
+            let Some(spec) = self.agents.get(i).cloned() else {
+                continue;
+            };
+            let tx = tx.clone();
+            let project_dir = self.project_dir.clone();
+            let lead = self.lead_agent.clone();
+            let delay_ms = (attempt as u64).saturating_mul(SPAWN_STAGGER_MS);
+            thread::spawn(move || {
+                if delay_ms > 0 {
+                    thread::sleep(Duration::from_millis(delay_ms));
+                }
+                let result = AgentPane::spawn(spec, per_rows, per_cols, &project_dir, &lead)
+                    .map_err(|e| e.to_string());
+                let _ = tx.send((i, result));
+            });
+        }
+        drop(tx);
+    }
+
+    fn failed_spawn_indices(&self) -> Vec<usize> {
+        self.panes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| if p.is_none() { Some(i) } else { None })
+            .collect()
+    }
+
+    fn spawn_failure_status(&self, failed: &[usize]) -> String {
+        let details: Vec<String> = failed
+            .iter()
+            .filter_map(|i| self.agents.get(*i))
+            .map(|a| format!("{}（cmd={}）", a.name, a.command))
+            .collect();
+        format!(
+            "{} 个 Agent 未启动：{}。检查 agents.yaml / AGENT_BIN，Ctrl+I !doctor",
+            failed.len(),
+            details.join(", ")
+        )
+    }
+
+    fn try_finish_spawn_batch(&mut self) {
+        let failed = self.failed_spawn_indices();
+        if !failed.is_empty() && self.spawn_retry_round < MAX_SPAWN_RETRIES {
+            self.spawn_retry_round += 1;
+            self.spawn_retry_at = Some((
+                Instant::now() + SPAWN_RETRY_DELAY,
+                failed,
+            ));
+            self.status = format!(
+                "{} — 3秒后自动重试 ({}/{})",
+                self.spawn_failure_status(&self.failed_spawn_indices()),
+                self.spawn_retry_round,
+                MAX_SPAWN_RETRIES
+            );
+            self.dirty = true;
+            return;
+        }
+        let ok = self.panes.iter().filter(|p| p.is_some()).count();
+        if failed.is_empty() {
+            self.status = format!(
+                "已启动 {ok} 个 Agent — Ctrl+I !任务 说需求  |  Ctrl+G 速查  |  F2 单人",
+                ok = ok,
+            );
+        } else {
+            self.status = self.spawn_failure_status(&failed);
+        }
+        self.finish_spawn_setup();
+        self.dirty = true;
+    }
+
     fn finish_spawn_setup(&mut self) {
+        if self.spawn_setup_done {
+            return;
+        }
+        self.spawn_setup_done = true;
         self.spawn_finished_at = Some(Instant::now());
-        self.lead_watch
-            .arm_briefing(Instant::now() + lead_watch::BRIEFING_DELAY);
+        if crate::coord_dedupe::initial_briefing_already_sent(&self.project_dir, &self.lead_agent)
+        {
+            self.lead_watch.skip_persisted_initial_briefing();
+        } else {
+            self.lead_watch
+                .arm_briefing(Instant::now() + lead_watch::BRIEFING_DELAY);
+        }
         if let Some(spec) = self.agents.iter().find(|a| a.name == self.lead_agent) {
             if let Err(e) = sync_lead_coordination_rules(&self.project_dir, &spec.worktree) {
                 terminal::log_message(
@@ -290,7 +451,7 @@ impl App {
                 &format!("agent memory init: {e}"),
             );
         }
-        if let Err(e) = crate::memory_fts::reindex_all(&self.project_dir) {
+        if let Err(e) = crate::memory_fts::maybe_reindex_on_startup(&self.project_dir) {
             terminal::log_message(
                 &self.project_dir,
                 "warn",
@@ -328,15 +489,16 @@ impl App {
                 }
             }
         }
+        if pending.done < pending.total {
+            self.status = format!(
+                "正在启动 Agent… {}/{}",
+                pending.done, pending.total
+            );
+            self.dirty = true;
+        }
         if pending.done >= pending.total {
             self.pending_spawn = None;
-            self.status = format!(
-                "已在 {} 启动 {} 个 Agent",
-                self.project_dir.display(),
-                self.panes.iter().filter(|p| p.is_some()).count(),
-            );
-            self.finish_spawn_setup();
-            self.dirty = true;
+            self.try_finish_spawn_batch();
         }
     }
 
@@ -351,6 +513,13 @@ impl App {
 
     pub fn tick(&mut self) {
         let now = Instant::now();
+        if let Some((retry_at, indices)) = self.spawn_retry_at.take() {
+            if now >= retry_at {
+                self.queue_spawn_indices(&indices);
+            } else {
+                self.spawn_retry_at = Some((retry_at, indices));
+            }
+        }
         self.poll_pending_spawns();
         if relay::process_pending_wakes(&mut self.panes, &mut self.relay) > 0 {
             self.dirty = true;
@@ -380,13 +549,21 @@ impl App {
                 )
                 .unwrap_or(false)
                 {
-                    self.dispatch_new_coord_events();
+                    self.dirty = true;
                 }
             }
         }
 
             if now.duration_since(self.last_meta_refresh) >= META_INTERVAL {
             self.inbox_line = meta::inbox_snippet(&self.project_dir, 2);
+            self.refresh_workflow_ui();
+            if self.pending_spawn.is_none()
+                && now.duration_since(self.last_pr_poll) >= PR_POLL_INTERVAL
+            {
+                self.last_pr_poll = now;
+                let _ = pr_lifecycle::maybe_auto_merge(&self.project_dir, &self.lead_agent);
+                let _ = pr_lifecycle::maybe_poll_merged(&self.project_dir, &self.lead_agent);
+            }
             if self.inbox.open {
                 self.inbox.refresh(&self.project_dir);
             }
@@ -442,7 +619,7 @@ impl App {
                     .unwrap_or(false)
                 };
                 if briefing_sent {
-                    self.dispatch_new_coord_events();
+                    self.dirty = true;
                 }
                 let periodic = {
                     let lead_pane = self.panes.get(idx).and_then(|p| p.as_ref());
@@ -455,7 +632,7 @@ impl App {
                     .unwrap_or(false)
                 };
                 if periodic {
-                    self.dispatch_new_coord_events();
+                    self.dirty = true;
                 }
                 let dispatched = lead_watch::watch_lead_pane(
                     &self.project_dir,
@@ -550,7 +727,7 @@ impl App {
                         .unwrap_or(false)
                     };
                     if rebrief {
-                        self.dispatch_new_coord_events();
+                        self.dirty = true;
                     }
                 }
             }
@@ -578,14 +755,13 @@ impl App {
         let mut restarted = false;
         for i in 0..self.panes.len() {
             if self.panes[i].is_none() {
-                if self.can_restart(i) {
-                    if self.restart_pane(i) {
+                if self.can_restart(i)
+                    && self.restart_pane(i) {
                         restarted = true;
                         if let Some(spec) = self.agents.get(i) {
                             self.status = format!("已重启 {}（进程缺失）", spec.name);
                         }
                     }
-                }
                 continue;
             }
 
@@ -599,14 +775,13 @@ impl App {
             }
 
             if let HealthState::Dead(reason) = state {
-                if self.can_restart(i) {
-                    if self.restart_pane(i) {
+                if self.can_restart(i)
+                    && self.restart_pane(i) {
                         restarted = true;
                         if let Some(spec) = self.agents.get(i) {
                             self.status = format!("已重启 {}（{reason}）", spec.name);
                         }
                     }
-                }
             }
         }
         if restarted {
@@ -747,34 +922,37 @@ impl App {
         let agent_names: Vec<String> = self.agents.iter().map(|a| a.name.clone()).collect();
         let focused_agent = self.agents.get(self.focus).map(|a| a.name.as_str());
 
-        let events_outcome = self
-            .events
-            .handle_key(code, modifiers, &self.project_dir);
-        if events_outcome.consumed {
-            if self.events.open {
-                self.inbox.close();
-                self.tasks.close();
-            }
-            if let Some(s) = events_outcome.status.filter(|s| !s.is_empty()) {
+        let confirm_outcome = self.confirm.handle_key(code, modifiers);
+        if confirm_outcome.consumed {
+            if let Some(verb) = confirm_outcome.confirmed {
+                match ops::execute(&self.project_dir, &self.lead_agent, verb) {
+                    Ok(status) => {
+                        self.status = truncate_ops_status(&status);
+                        self.refresh_workflow_ui();
+                    }
+                    Err(e) => {
+                        self.status = format!("操作失败：{e:#}");
+                    }
+                }
+            } else if let Some(s) = confirm_outcome.status.filter(|s| !s.is_empty()) {
                 self.status = s;
-            } else if !self.events.open {
-                self.status = "就绪".into();
             }
             self.dirty = true;
             return;
         }
 
-        let tasks_outcome = self
-            .tasks
+        let help_outcome = self
+            .help
             .handle_key(code, modifiers, &self.project_dir);
-        if tasks_outcome.consumed {
-            if self.tasks.open {
+        if help_outcome.consumed {
+            if self.help.open {
                 self.inbox.close();
+                self.tasks.close();
                 self.events.close();
             }
-            if let Some(s) = tasks_outcome.status.filter(|s| !s.is_empty()) {
+            if let Some(s) = help_outcome.status.filter(|s| !s.is_empty()) {
                 self.status = s;
-            } else if !self.tasks.open {
+            } else if !self.help.open {
                 self.status = "就绪".into();
             }
             self.dirty = true;
@@ -790,15 +968,70 @@ impl App {
             &self.lead_agent,
         );
         if outcome.consumed {
+            let has_side_effect = outcome.side_effect.is_some();
+            let has_pending_confirm = outcome.pending_confirm.is_some();
+            if let Some(effect) = outcome.side_effect {
+                match effect {
+                    crate::ops::OpsVerb::ShowGuide => self.help.open_guide(&self.project_dir),
+                    crate::ops::OpsVerb::ShowNext => self.help.open_next(&self.project_dir),
+                    _ => {}
+                }
+            }
+            if let Some(verb) = outcome.pending_confirm {
+                self.confirm.open_for(verb);
+            }
             if self.inbox.open {
                 self.tasks.close();
                 self.events.close();
+                if !has_side_effect && !has_pending_confirm {
+                    self.help.close();
+                    self.confirm.close();
+                }
             }
             if let Some(s) = outcome.status.filter(|s| !s.is_empty()) {
                 self.status = s;
                 self.inbox_line = meta::inbox_snippet(&self.project_dir, 2);
                 self.sync_agent_meta();
+                self.refresh_workflow_ui();
             } else if !self.inbox.open {
+                self.status = "就绪".into();
+            }
+            self.dirty = true;
+            return;
+        }
+
+        let tasks_outcome = self
+            .tasks
+            .handle_key(code, modifiers, &self.project_dir);
+        if tasks_outcome.consumed {
+            if self.tasks.open {
+                self.inbox.close();
+                self.events.close();
+                self.help.close();
+                self.confirm.close();
+            }
+            if let Some(s) = tasks_outcome.status.filter(|s| !s.is_empty()) {
+                self.status = s;
+            } else if !self.tasks.open {
+                self.status = "就绪".into();
+            }
+            self.dirty = true;
+            return;
+        }
+
+        let events_outcome = self
+            .events
+            .handle_key(code, modifiers, &self.project_dir);
+        if events_outcome.consumed {
+            if self.events.open {
+                self.inbox.close();
+                self.tasks.close();
+                self.help.close();
+                self.confirm.close();
+            }
+            if let Some(s) = events_outcome.status.filter(|s| !s.is_empty()) {
+                self.status = s;
+            } else if !self.events.open {
                 self.status = "就绪".into();
             }
             self.dirty = true;
@@ -834,6 +1067,21 @@ impl App {
 
         if code == KeyCode::F(2) {
             self.toggle_view();
+            return;
+        }
+
+        if code == KeyCode::F(5) && self.focused_pane_needs_restart() {
+            let name = self
+                .agents
+                .get(self.focus)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| format!("{}", self.focus + 1));
+            if self.restart_pane(self.focus) {
+                self.status = format!("F5 已重启 {name}");
+            } else {
+                self.status = format!("F5 重启 {name} 失败 — 看 agents.yaml / !doctor");
+            }
+            self.dirty = true;
             return;
         }
 
@@ -873,6 +1121,16 @@ impl App {
             _ => {}
         }
     }
+}
+
+fn truncate_ops_status(s: &str) -> String {
+    const MAX: usize = 200;
+    if s.chars().count() <= MAX {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(MAX).collect();
+    out.push('…');
+    out
 }
 
 pub(crate) fn estimate_pane_size(rows: u16, cols: u16, count: usize) -> (u16, u16) {

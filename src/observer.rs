@@ -21,6 +21,8 @@ use crate::meta::{self, CoordEvent};
 use crate::task_dag;
 use crate::task_state::{self, TaskSnapshot};
 use crate::terminal;
+use crate::workflow_phase;
+
 
 const DEFAULT_PORT: u16 = 8787;
 
@@ -55,10 +57,20 @@ pub struct TaskSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowSummary {
+    pub phase: String,
+    pub title: String,
+    pub detail: String,
+    pub action: String,
+    pub command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObserverSnapshot {
     pub generated_at: String,
     pub project_dir: String,
     pub lead: String,
+    pub workflow: WorkflowSummary,
     pub agents: Vec<AgentSummary>,
     pub tasks: Vec<TaskSummary>,
     pub mailbox: Vec<MailboxEntry>,
@@ -94,14 +106,24 @@ pub fn build_snapshot(project_dir: &Path) -> Result<ObserverSnapshot> {
 
     let mut tasks: Vec<TaskSummary> = states
         .values()
-        .map(|s| task_to_summary(s))
+        .map(task_to_summary)
         .collect();
     tasks.sort_by(|a, b| b.updated.cmp(&a.updated));
+
+    let wf = workflow_phase::evaluate(project_dir);
+    let workflow = WorkflowSummary {
+        phase: workflow_phase::phase_id(&wf.phase).to_string(),
+        title: wf.title,
+        detail: wf.detail,
+        action: wf.action,
+        command: wf.command,
+    };
 
     Ok(ObserverSnapshot {
         generated_at: meta::inbox_timestamp_iso(),
         project_dir: project_dir.display().to_string(),
         lead,
+        workflow,
         agents: agent_summaries,
         mailbox: mailbox::load_entries(project_dir, 40),
         events: meta::load_coord_events(project_dir)
@@ -159,6 +181,7 @@ pub fn spawn_background(project_dir: PathBuf) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::explicit_counter_loop)]
 fn run_server_loop(
     server: Server,
     project_dir: PathBuf,
@@ -296,10 +319,10 @@ impl SseReader {
 
     fn push_snapshot(&mut self) -> io::Result<()> {
         let snap = build_snapshot(&self.project_dir)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
         self.last_fp = coord_fingerprint(&self.project_dir);
         let json = serde_json::to_string(&snap)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
         self.buffer = format!("event: snapshot\ndata: {json}\n\n").into_bytes();
         self.offset = 0;
         self.events_sent += 1;
@@ -355,6 +378,9 @@ pub fn verify_http_snapshot(project_dir: &Path) -> Result<()> {
     }
     if snap.project_dir.is_empty() {
         anyhow::bail!("observer snapshot: missing project_dir");
+    }
+    if snap.workflow.title.is_empty() {
+        anyhow::bail!("observer snapshot: missing workflow");
     }
 
     let health = http_get_json(port, "/api/health")?;

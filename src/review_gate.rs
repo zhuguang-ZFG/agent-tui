@@ -33,6 +33,24 @@ pub fn is_batch_review_task(task: &str) -> bool {
     task.contains("-batch-review-")
 }
 
+/// Pre-PR smoke (`{prefix}-post-merge-smoke-{hash}`) — meta task, not implementation.
+pub fn is_smoke_task(task: &str) -> bool {
+    task.contains("-post-merge-smoke-")
+}
+
+/// Post-GitHub-merge verification (`{prefix}-post-github-merge-{hash}`).
+pub fn is_post_github_merge_task(task: &str) -> bool {
+    task.contains("-post-github-merge-")
+}
+
+pub fn is_meta_task(task: &str) -> bool {
+    is_review_task(task)
+        || is_batch_review_task(task)
+        || is_smoke_task(task)
+        || is_post_github_merge_task(task)
+        || task.ends_with("-unblock")
+}
+
 pub fn review_task_id(task: &str) -> String {
     format!("{task}{}", review_suffix())
 }
@@ -90,7 +108,7 @@ pub fn apply_implementation_done(
     task: &str,
     summary: &str,
 ) -> ReviewGateOutcome {
-    if !review_gate_enabled() || is_review_task(task) || is_batch_review_task(task) {
+    if !review_gate_enabled() || is_meta_task(task) {
         return ReviewGateOutcome {
             status: "done".into(),
             summary: summary.to_string(),

@@ -1,5 +1,5 @@
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
@@ -8,13 +8,14 @@ use crate::app::App;
 use crate::health::HealthState;
 use crate::meta::AgentMeta;
 use crate::pane::AgentPane;
+use crate::workflow_phase;
 
 fn pane_rects(area: ratatui::layout::Rect, count: usize, fullscreen: Option<usize>) -> Vec<(usize, ratatui::layout::Rect)> {
     if let Some(idx) = fullscreen {
         return vec![(idx, area)];
     }
     let rects = grid_rects(area, count);
-    rects.into_iter().enumerate().map(|(i, r)| (i, r)).collect()
+    rects.into_iter().enumerate().collect()
 }
 
 fn grid_rects(area: ratatui::layout::Rect, count: usize) -> Vec<ratatui::layout::Rect> {
@@ -105,13 +106,16 @@ fn short_label(s: &str, max: usize) -> String {
     format!("…{}", tail.chars().rev().collect::<String>())
 }
 
+fn health_suffix(health: &HealthState) -> String {
+    match health {
+        HealthState::Ok => String::new(),
+        HealthState::Warn(r) => format!(" ⚠{}", short_label(r, 12)),
+        HealthState::Dead(r) => format!(" ✘{}", short_label(r, 12)),
+    }
+}
+
 fn pane_title(index: usize, name: &str, meta: &AgentMeta, health: &HealthState) -> String {
     let branch = short_label(&meta.branch, 14);
-    let badge = match health {
-        HealthState::Ok => "",
-        HealthState::Warn(_) => " ⚠",
-        HealthState::Dead(_) => " ✘",
-    };
     let unread_badge = if meta.unread > 0 {
         format!(" ●{}", meta.unread)
     } else {
@@ -119,16 +123,232 @@ fn pane_title(index: usize, name: &str, meta: &AgentMeta, health: &HealthState) 
     };
     let conflict = if meta.claim_conflict { " ⚡" } else { "" };
     let tasks = tasks_suffix(meta);
+    let health = health_suffix(health);
     format!(
         " {} {} {}{}{}{}{} ",
         index + 1,
         name,
         branch,
         tasks,
-        badge,
+        health,
         unread_badge,
         conflict
     )
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+fn chrome_row_primary(app: &App) -> Line<'static> {
+    let phase_color = workflow_phase::badge_color(&app.workflow_phase);
+    let mut spans = vec![
+        Span::styled(
+            app.workflow_badge.clone(),
+            Style::default()
+                .fg(phase_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if !app.workflow_hint.is_empty() {
+        spans.push(Span::raw(" · "));
+        spans.push(Span::styled(
+            truncate_chars(&app.workflow_hint, 42),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    spans.push(Span::raw("  │  "));
+    let status_style = if app.status.starts_with("操作失败") || app.status.contains("失败") {
+        Style::default().fg(Color::Red)
+    } else if app.status.starts_with("正在启动")
+        || app.status.contains("已确认")
+        || app.status.contains("重试")
+    {
+        Style::default().fg(Color::Yellow)
+    } else if app.status == "就绪" {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    spans.push(Span::styled(
+        truncate_chars(&app.status, 72),
+        status_style,
+    ));
+    Line::from(spans)
+}
+
+fn shortcut_spans() -> Vec<Span<'static>> {
+    vec![
+        Span::styled("Ctrl+I", Style::default().fg(Color::Yellow)),
+        Span::raw(" 留言 "),
+        Span::styled("Ctrl+T", Style::default().fg(Color::Yellow)),
+        Span::raw(" 任务 "),
+        Span::styled("Ctrl+N", Style::default().fg(Color::Yellow)),
+        Span::raw(" 进度 "),
+        Span::styled("Ctrl+G", Style::default().fg(Color::Yellow)),
+        Span::raw(" 速查 "),
+        Span::styled("Ctrl+Q", Style::default().fg(Color::Yellow)),
+        Span::raw(" 退出"),
+    ]
+}
+
+fn chrome_row_secondary(app: &App, solo: bool) -> Line<'static> {
+    let mut spans = Vec::new();
+
+    if let Some(secs) = app.spawn_retry_countdown_secs() {
+        spans.push(Span::styled(
+            format!("启动重试 {secs}s"),
+            Style::default().fg(Color::Yellow),
+        ));
+        spans.push(Span::raw("  "));
+    } else if let Some((done, total)) = app.spawn_progress() {
+        spans.push(Span::styled(
+            format!("启动 {done}/{total}"),
+            Style::default().fg(Color::Yellow),
+        ));
+        spans.push(Span::raw("  "));
+    } else {
+        let alive = app.agents_alive_count();
+        let total = app.panes.len();
+        if total > 0 && alive < total {
+            spans.push(Span::styled(
+                format!("{alive}/{total} 在线"),
+                Style::default().fg(Color::Red),
+            ));
+            spans.push(Span::raw(" F5重试  "));
+        } else if !app.inbox_line.is_empty() {
+            spans.push(Span::styled(
+                truncate_chars(&app.inbox_line, 48),
+                Style::default().fg(Color::DarkGray),
+            ));
+            spans.push(Span::raw("  "));
+        }
+    }
+
+    if solo {
+        let name = app
+            .agents
+            .get(app.focus)
+            .map(|a| a.name.as_str())
+            .unwrap_or("-");
+        let n = app.panes.len();
+        let idx = app.focus + 1;
+        let unread = app
+            .agent_meta(app.focus)
+            .map(|m| m.unread)
+            .unwrap_or(0);
+        let dot = if unread > 0 { " ●" } else { "" };
+        spans.push(Span::styled(
+            format!("{name}{dot} ({idx}/{n})"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled("Ctrl+Tab", Style::default().fg(Color::Yellow)));
+        spans.push(Span::raw(" 切换  "));
+        spans.push(Span::styled("F2", Style::default().fg(Color::Yellow)));
+        spans.push(Span::raw(" 宫格  "));
+    } else {
+        spans.push(Span::styled("宫格", Style::default().fg(Color::Yellow)));
+        let alive = app.agents_alive_count();
+        let total = app.panes.len();
+        if total > 0 {
+            spans.push(Span::raw(format!(" {alive}/{total} ")));
+        }
+        spans.push(Span::raw("主:"));
+        spans.push(Span::styled(
+            app.lead_agent.clone(),
+            Style::default().fg(Color::Cyan),
+        ));
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled("Ctrl+1~8", Style::default().fg(Color::Yellow)));
+        spans.push(Span::raw(" 聚焦  "));
+        spans.push(Span::styled("Ctrl+Tab", Style::default().fg(Color::Yellow)));
+        spans.push(Span::raw(" 切换  "));
+        spans.push(Span::styled("F2", Style::default().fg(Color::Yellow)));
+        spans.push(Span::raw(" 单人  "));
+        spans.push(Span::styled("F5", Style::default().fg(Color::Yellow)));
+        spans.push(Span::raw(" 重启  "));
+    }
+
+    spans.push(Span::styled("Ctrl+E", Style::default().fg(Color::Yellow)));
+    spans.push(Span::raw(" 事件  "));
+    spans.extend(shortcut_spans());
+    Line::from(spans)
+}
+
+fn confirm_status_bar() -> Line<'static> {
+    Line::from(vec![
+        Span::styled("Y/Enter", Style::default().fg(Color::Green)),
+        Span::raw(" 执行  "),
+        Span::styled("N/Esc", Style::default().fg(Color::Yellow)),
+        Span::raw(" 取消"),
+    ])
+}
+
+fn inbox_status_bar() -> Line<'static> {
+    Line::from(vec![
+        Span::styled("Enter", Style::default().fg(Color::Yellow)),
+        Span::raw(" 发送  "),
+        Span::styled("!pr", Style::default().fg(Color::Cyan)),
+        Span::raw(" !merge  "),
+        Span::styled("!map", Style::default().fg(Color::Cyan)),
+        Span::raw("  "),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::raw(" 关闭  "),
+        Span::styled("Ctrl+G/N", Style::default().fg(Color::Yellow)),
+        Span::raw(" 速查/进度"),
+    ])
+}
+
+fn help_status_bar() -> Line<'static> {
+    Line::from(vec![
+        Span::styled("↑↓", Style::default().fg(Color::Yellow)),
+        Span::raw(" 滚动  "),
+        Span::styled("Ctrl+R", Style::default().fg(Color::Yellow)),
+        Span::raw(" 刷新  "),
+        Span::styled("Ctrl+G", Style::default().fg(Color::Yellow)),
+        Span::raw(" 速查  "),
+        Span::styled("Ctrl+N", Style::default().fg(Color::Yellow)),
+        Span::raw(" 进度  "),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::raw(" 关闭"),
+    ])
+}
+
+fn tasks_status_bar(scroll: usize, total: usize) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("↑↓", Style::default().fg(Color::Yellow)),
+        Span::raw(" 移动  "),
+        Span::styled("Space", Style::default().fg(Color::Yellow)),
+        Span::raw(" 折叠批次  "),
+        Span::styled("Enter", Style::default().fg(Color::Yellow)),
+        Span::raw(" 搜记忆  "),
+        Span::styled("Ctrl+R", Style::default().fg(Color::Yellow)),
+        Span::raw(" 刷新  "),
+        Span::raw(format!("行 {}/{total} ", scroll + 1)),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::raw(" 关闭"),
+    ])
+}
+
+fn events_status_bar() -> Line<'static> {
+    Line::from(vec![
+        Span::styled("↑↓", Style::default().fg(Color::Yellow)),
+        Span::raw(" 滚动  "),
+        Span::styled("End", Style::default().fg(Color::Yellow)),
+        Span::raw(" 最新  "),
+        Span::styled("Ctrl+R", Style::default().fg(Color::Yellow)),
+        Span::raw(" 刷新  "),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::raw(" 关闭"),
+    ])
 }
 
 fn render_solo_pane(f: &mut Frame, pane: &AgentPane, area: ratatui::layout::Rect) {
@@ -166,97 +386,22 @@ fn render_grid_pane(
     });
 }
 
-fn status_bar_solo(app: &App) -> Line<'static> {
-    let name = app
-        .agents
-        .get(app.focus)
-        .map(|a| a.name.as_str())
-        .unwrap_or("-");
-    let n = app.panes.len();
-    let idx = app.focus + 1;
-    let unread = app
-        .agent_meta(app.focus)
-        .map(|m| m.unread)
-        .unwrap_or(0);
-    let dot = if unread > 0 { " ●" } else { "" };
-    Line::from(vec![
-        Span::styled(
-            format!("{name}{dot} ({idx}/{n})"),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled("Ctrl+Tab", Style::default().fg(Color::Yellow)),
-        Span::raw(" 切换  "),
-        Span::styled("F2", Style::default().fg(Color::Yellow)),
-        Span::raw(" 四宫格  "),
-        Span::styled("Ctrl+I", Style::default().fg(Color::Yellow)),
-        Span::raw(" 留言  "),
-        Span::styled("Ctrl+T", Style::default().fg(Color::Yellow)),
-        Span::raw(" 任务  "),
-        Span::styled("Ctrl+E", Style::default().fg(Color::Yellow)),
-        Span::raw(" 事件  "),
-        Span::styled("Ctrl+Q", Style::default().fg(Color::Yellow)),
-        Span::raw(" 退出"),
-    ])
-}
-
-fn status_bar_grid(app: &App) -> Line<'static> {
-    Line::from(vec![
-        Span::styled("宫格", Style::default().fg(Color::Yellow)),
-        Span::raw(" 主:"),
-        Span::styled(app.lead_agent.clone(), Style::default().fg(Color::Cyan)),
-        Span::raw("  "),
-        Span::styled("Ctrl+1~5", Style::default().fg(Color::Yellow)),
-        Span::raw(" 聚焦  "),
-        Span::styled("F2", Style::default().fg(Color::Yellow)),
-        Span::raw(" 单人  "),
-        Span::styled("Ctrl+T", Style::default().fg(Color::Yellow)),
-        Span::raw(" 任务  "),
-        Span::styled("Ctrl+E", Style::default().fg(Color::Yellow)),
-        Span::raw(" 事件  "),
-        Span::styled("Ctrl+Q", Style::default().fg(Color::Yellow)),
-        Span::raw(" 退出"),
-    ])
-}
-
-fn inbox_status_bar() -> Line<'static> {
-    Line::from(vec![
-        Span::styled("Enter", Style::default().fg(Color::Yellow)),
-        Span::raw(" 发送  "),
-        Span::styled("Esc", Style::default().fg(Color::Yellow)),
-        Span::raw(" 关闭留言板"),
-    ])
-}
-
-fn tasks_status_bar() -> Line<'static> {
-    Line::from(vec![
-        Span::styled("Enter", Style::default().fg(Color::Yellow)),
-        Span::raw(" 搜索记忆  "),
-        Span::styled("Tab", Style::default().fg(Color::Yellow)),
-        Span::raw(" 返回看板  "),
-        Span::styled("Ctrl+R", Style::default().fg(Color::Yellow)),
-        Span::raw(" 刷新  "),
-        Span::styled("Esc", Style::default().fg(Color::Yellow)),
-        Span::raw(" 关闭"),
-    ])
-}
-
-fn events_status_bar() -> Line<'static> {
-    Line::from(vec![
-        Span::styled("↑↓", Style::default().fg(Color::Yellow)),
-        Span::raw(" 滚动  "),
-        Span::styled("End", Style::default().fg(Color::Yellow)),
-        Span::raw(" 最新  "),
-        Span::styled("Ctrl+R", Style::default().fg(Color::Yellow)),
-        Span::raw(" 刷新  "),
-        Span::styled("Esc", Style::default().fg(Color::Yellow)),
-        Span::raw(" 关闭"),
-    ])
-}
-
 pub fn draw(f: &mut Frame, app: &mut App) {
+    if app.confirm.open {
+        let root = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
+        app.confirm.draw(f, root[0]);
+        f.render_widget(Paragraph::new(confirm_status_bar()), root[1]);
+        return;
+    }
+
+    if app.help.open {
+        let root = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
+        f.render_widget(Clear, root[0]);
+        app.help.draw(f, root[0]);
+        f.render_widget(Paragraph::new(help_status_bar()), root[1]);
+        return;
+    }
+
     if app.events.open {
         let root = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
         f.render_widget(Clear, root[0]);
@@ -269,7 +414,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let root = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
         f.render_widget(Clear, root[0]);
         app.tasks.draw(f, root[0]);
-        f.render_widget(Paragraph::new(tasks_status_bar()), root[1]);
+        let (scroll, total) = app.tasks.cursor_info();
+        f.render_widget(Paragraph::new(tasks_status_bar(scroll, total)), root[1]);
         return;
     }
 
@@ -283,14 +429,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let solo = app.is_solo();
 
-    let root = if solo {
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area())
-    } else {
-        Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(f.area())
-    };
+    let root = Layout::vertical([
+        Constraint::Min(3),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(f.area());
 
     let pane_area = root[0];
-    let status_area = root[1];
+    let chrome_primary = root[1];
+    let chrome_secondary = root[2];
 
     let layout_count = if app.is_solo() {
         1
@@ -316,11 +464,23 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             Some(pane) if is_solo_pane => render_solo_pane(f, pane, rect),
             Some(pane) => render_grid_pane(f, pane, rect, i == app.focus, i, &meta, &health),
             None => {
+                let cmd = app
+                    .agents
+                    .get(i)
+                    .map(|a| a.command.as_str())
+                    .unwrap_or("?");
                 let block = ratatui::widgets::Block::default()
                     .title(title)
                     .borders(ratatui::widgets::Borders::ALL)
                     .border_style(Style::default().fg(Color::Red));
-                let msg = Paragraph::new("启动失败")
+                let reason = match &health {
+                    HealthState::Dead(r) => r.as_str(),
+                    _ => "启动失败",
+                };
+                let body = format!(
+                    "{reason}\n\ncmd: {cmd}\n\nF5 手动重试  |  Ctrl+I !doctor 体检",
+                );
+                let msg = Paragraph::new(body)
                     .block(block)
                     .style(Style::default().fg(Color::DarkGray));
                 f.render_widget(msg, rect);
@@ -328,10 +488,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
     }
 
-    let help = if solo {
-        status_bar_solo(app)
-    } else {
-        status_bar_grid(app)
-    };
-    f.render_widget(Paragraph::new(help), status_area);
+    f.render_widget(Paragraph::new(chrome_row_primary(app)), chrome_primary);
+    f.render_widget(Paragraph::new(chrome_row_secondary(app, solo)), chrome_secondary);
 }

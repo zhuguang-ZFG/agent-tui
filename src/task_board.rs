@@ -1,74 +1,21 @@
-//! Task board summary for CLI / status strip.
+//! Task board summary for CLI / Ctrl+T overlay.
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
+use crate::batch_group;
 use crate::claims;
-use crate::config;
 use crate::dead_letter;
 use crate::task_dag;
-use crate::task_state;
 
 pub fn format_task_board(project_dir: &Path) -> Result<String> {
-    let agents = config::load_agents(project_dir).context("load agents")?;
-    let lead = config::resolve_lead_agent(&agents);
+    let _ = crate::routing::ensure_routing_template(project_dir);
+    let collapsed = std::collections::BTreeSet::new();
+    let mut lines = batch_group::format_grouped_board(project_dir, &collapsed);
+
     let snapshot = claims::load_claims_snapshot(project_dir);
-    let completed = task_dag::load_completed_tasks(project_dir);
     let pending = task_dag::load_pending_plans(project_dir);
-    let states = task_state::load_snapshots(project_dir);
-
-    let mut lines = vec![
-        format!("主 Agent: {lead}"),
-        String::from("── 状态机（task_state） ──"),
-    ];
-    let mut any_state = false;
-    for status in [
-        "delegated",
-        "pending",
-        "awaiting_review",
-        "review_failed",
-        "blocked",
-        "failed",
-        "done",
-    ] {
-        let group = task_state::tasks_by_status(&states, status);
-        if group.is_empty() {
-            continue;
-        }
-        any_state = true;
-        lines.push(format!("  [{status}]"));
-        for s in group.iter().take(8) {
-            lines.push(task_state::format_status_line(s));
-        }
-    }
-    if !any_state {
-        lines.push("  (无)".into());
-    }
-
-    lines.push(String::from("── 活跃认领 ──"));
-    let mut any_active = false;
-    for spec in &agents {
-        if let Some(tasks) = snapshot.agent_tasks.get(&spec.name) {
-            if tasks.is_empty() {
-                continue;
-            }
-            any_active = true;
-            lines.push(format!("  {}: {}", spec.name, tasks.join(", ")));
-        }
-    }
-    if !any_active {
-        lines.push("  (无)".into());
-    }
-
-    lines.push(String::from("── 已完成（DAG） ──"));
-    if completed.is_empty() {
-        lines.push("  (无)".into());
-    } else {
-        for t in completed.iter().take(12) {
-            lines.push(format!("  ✓ {t}"));
-        }
-    }
 
     lines.push(String::from("── 等待依赖 ──"));
     if pending.is_empty() {
@@ -104,5 +51,21 @@ pub fn format_task_board(project_dir: &Path) -> Result<String> {
         }
     }
 
+    Ok(lines.join("\n"))
+}
+
+pub fn format_task_board_collapsed(
+    project_dir: &Path,
+    collapsed: &std::collections::BTreeSet<String>,
+) -> Result<String> {
+    let _ = crate::routing::ensure_routing_template(project_dir);
+    let mut lines = batch_group::format_grouped_board(project_dir, collapsed);
+    let pending = task_dag::load_pending_plans(project_dir);
+    if !pending.is_empty() {
+        lines.push(String::from("── 等待依赖 ──"));
+        for p in &pending {
+            lines.push(format!("  {} → {}", p.worker, p.task));
+        }
+    }
     Ok(lines.join("\n"))
 }

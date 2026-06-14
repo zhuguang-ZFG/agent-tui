@@ -328,6 +328,12 @@ Relay 注入的消息 **必须处理**：
 ```powershell
 # 诊断
 agent-tui --check --project-dir D:\proj
+agent-tui doctor --project-dir D:\proj
+agent-tui guide --project-dir D:\proj          # 打印速查
+agent-tui next --project-dir D:\proj           # 当前阶段 + 下一步
+
+# 启动
+agent-tui up --project-dir D:\proj             # 启动 TUI（默认入口）
 
 # 协调消息
 agent-tui notify claude "消息" --from mimo --project-dir D:\proj
@@ -347,6 +353,20 @@ agent-tui tasks --project-dir D:\proj
 agent-tui events --project-dir D:\proj
 agent-tui memory-search "auth" --project-dir D:\proj
 agent-tui memory-reindex --project-dir D:\proj
+
+# 项目地图
+agent-tui map --project-dir D:\proj
+
+# 合并 / PR / 审查
+agent-tui merge --project-dir D:\proj                  # 交互式 merge.sh
+agent-tui merge --all --project-dir D:\proj             # 非交互合并所有 agent 分支
+agent-tui pr-create --project-dir D:\proj               # gh pr create
+agent-tui pr-status --project-dir D:\proj               # 查询 PR 状态
+agent-tui pr-merge --project-dir D:\proj                # gh pr merge
+agent-tui review --project-dir D:\proj                  # 批次审查
+agent-tui review --force --project-dir D:\proj          # 强制重审
+agent-tui clean-verify --project-dir D:\proj            # 清理 verify-loop 残留
+agent-tui reset-batch --project-dir D:\proj             # 重置交付批次指纹
 
 # Web 只读面板（默认 http://127.0.0.1:8787/）
 agent-tui serve --project-dir D:\proj --port 8787
@@ -407,6 +427,19 @@ agent-tui verify-live --project-dir D:\proj
 | `AGENT_TUI_OBSERVER` | 0 | TUI 附带 Web 面板 |
 | `AGENT_TUI_OBSERVER_PORT` | 8787 | Web 端口 |
 | `AGENT_TUI_OBSERVER_SSE_MS` | 2000 | SSE 推送间隔 |
+
+### 8.3 全自动交付（可选）
+
+| 变量 | 默认 | 作用 |
+|------|------|------|
+| `AGENT_TUI_AUTO_PR` | 0 | merge-ready + smoke 通过后自动 `gh pr create` |
+| `AGENT_TUI_AUTO_MERGE` | 0 | CI 通过后自动 `gh pr merge` |
+| `AGENT_TUI_POLL_PR` | 1 | 轮询 PR 是否已合并 |
+| `AGENT_TUI_POST_MERGE_SMOKE` | 1 | merge-ready 后委派 smoke 任务 |
+| `AGENT_TUI_AUTO_MERGE_SQUASH` | 0 | auto-merge 使用 squash |
+| `AGENT_TUI_AUTO_MERGE_SKIP_REVIEW` | 0 | auto-merge 跳过 review 检查 |
+| `AGENT_TUI_FTS_ALWAYS` | 0 | 每次 TUI 启动强制重建记忆 FTS |
+| `AGENT_TUI_PROJECT_MAP` | — | Lead worktree 内 PROJECT_MAP 路径（TUI 注入） |
 
 完整 Agent 侧规则模板见 [`docs/COORDINATION-template.md`](COORDINATION-template.md)，部署到项目 `.agents/COORDINATION.md`。
 

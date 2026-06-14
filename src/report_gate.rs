@@ -9,6 +9,7 @@ use crate::config;
 use crate::terminal;
 
 pub struct GateOutcome {
+    #[allow(dead_code)]
     pub passed: bool,
     pub status: String,
     pub summary: String,

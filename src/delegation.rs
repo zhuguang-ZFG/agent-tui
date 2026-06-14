@@ -62,7 +62,7 @@ pub fn delegate_task(
     }
     claims::claim_task(project_dir, worker, task)?;
 
-    let body = if description.trim().is_empty() {
+    let mut body = if description.trim().is_empty() {
         format!(
             "【委派·{task}】请立即开始执行。完成后输出 agent-report 代码块（系统自动回传主 Agent）：\
              ```agent-report {{\"task\":\"{task}\",\"status\":\"done\",\"summary\":\"完成了什么\"}} ``` \
@@ -75,6 +75,28 @@ pub fn delegate_task(
             desc = description.trim()
         )
     };
+    if let Some(brief) = crate::specialists::delegate_briefing(project_dir, task, description) {
+        body = format!("{brief}\n\n{body}");
+        if let Some(spec) = crate::specialists::match_specialist(
+            &crate::specialists::load_all(project_dir),
+            task,
+            description,
+        ) {
+            if !spec.worker.eq_ignore_ascii_case(worker) {
+                let hint = format!(
+                    "【专家路由】任务「{task}」命中专家 {}，建议 @{w} 而非 @{worker}",
+                    spec.id,
+                    w = spec.worker,
+                );
+                terminal::log_message(project_dir, "info", &hint);
+                let key = format!("spec:{task}:{worker}");
+                if !already_hinted(project_dir, &key) {
+                    let _ = meta::notify_agent_from(project_dir, lead, &hint, "agent-tui");
+                    let _ = remember_hint(project_dir, &key);
+                }
+            }
+        }
+    }
     meta::notify_agent_from(project_dir, worker, &body, lead)?;
     meta::append_shared_line(
         project_dir,
@@ -175,6 +197,19 @@ pub fn report_task_auto(
                         &format!("review gate: 已委派 {reviewer}/{review_id}"),
                     );
                 }
+            } else if status == "done" {
+                // Persist this task as done before notifying, so merge-ready/batch-review checks
+                // see the updated state.
+                let _ = crate::task_state::on_report(
+                    project_dir,
+                    reporter,
+                    lead,
+                    task,
+                    "done",
+                    &summary,
+                );
+                let _ = dispatch_pending_plans(project_dir, lead);
+                let _ = crate::merge_ready::notify_lead_if_ready(project_dir, lead);
             }
         }
     } else if status == "failed" && review_gate::is_review_task(task) {
@@ -246,6 +281,12 @@ pub fn report_task_auto(
     let _ = crate::delegation_stats::maybe_auto_evolve(project_dir);
     if status == "done" || status == "failed" || status == "blocked" {
         let _ = crate::lead_followup::on_worker_report(project_dir, reporter, task, status);
+    }
+    if status == "done" && crate::post_merge_smoke::is_smoke_task(task) {
+        let merge = crate::merge_ready::evaluate(project_dir);
+        if merge.ready {
+            let _ = crate::auto_pr::maybe_create(project_dir, &merge.done_tasks);
+        }
     }
     Ok(())
 }

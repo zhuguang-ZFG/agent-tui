@@ -25,13 +25,13 @@ Copy-Item -Force target\release\agent-tui.exe .\bin\
 ### 启动
 
 ```powershell
-# 新项目：一键脚手架
-agent-tui init
-agent-tui doctor
+# 只记这一条（任意项目目录；首次会自动 init）
+agent-tui
+# 或
+agent-tui up --project-dir D:\your-project
 
-agent-tui --project-dir D:\your-project
-# 或配合 agents-complete
-.\your-project\.agents\clideckctl.cmd rust
+# 可选：仅体检
+agent-tui doctor
 ```
 
 ### 闭环验证
@@ -67,21 +67,26 @@ agent-tui serve --project-dir D:\your-project
 | `Ctrl+I` | 留言板 |
 | `Ctrl+T` | 任务看板 / 记忆搜索 |
 | `Ctrl+E` | 协调事件时间线 |
-| `F2` | 全屏 |
+| `F2` | 四宫格 / 单人全屏 |
+| `F5` | 重启当前失败/空格子 |
 | `Ctrl+Q` | 退出 |
 
 ## CLI 子命令
 
 ```powershell
+agent-tui                    # 默认：自动 init + 四宫格 TUI
+agent-tui up                 # 同上
+agent-tui init|doctor|guide|next|map|sync-lead
 agent-tui notify|broadcast|delegate|report ...
-agent-tui init|doctor|sync-lead
-agent-tui plan-submit|plan-dry-run ...
+agent-tui merge [--all]|pr-create|pr-status|pr-merge
+agent-tui plan-submit|plan-dry-run|review|evolve|reset-batch|clean-verify
 agent-tui tasks|events|memory-search|memory-reindex
-agent-tui verify-loop|verify-live
-agent-tui serve
+agent-tui verify-loop|verify-live|serve
 ```
 
-详见 [docs/WORKFLOW.md §7](docs/WORKFLOW.md#7-cli-命令一览)。
+留言板 `!` 命令与上表对应（`!merge-all` 非交互；`!merge` 在 TUI 内已禁用）。
+
+详见 [docs/WORKFLOW.md §7–§8](docs/WORKFLOW.md#7-cli-命令一览)。
 
 ## 诊断
 

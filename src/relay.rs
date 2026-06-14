@@ -50,12 +50,12 @@ impl RelayState {
 
     pub fn persist_with_plan_inbox(&self, plan_inbox_line: usize) {
         if let Some(dir) = self.project_dir.as_ref() {
-            let state = crate::coord_dedupe::RelayCursorState {
-                events_cursor: self.cursor,
-                mailbox_line: self.mailbox_line,
+            crate::coord_dedupe::update_relay_cursor_fields(
+                dir,
+                self.cursor,
+                self.mailbox_line,
                 plan_inbox_line,
-            };
-            let _ = crate::coord_dedupe::save_relay_cursor(dir, &state);
+            );
         }
     }
 
@@ -96,6 +96,16 @@ pub fn process_pending_wakes(panes: &mut [Option<AgentPane>], state: &mut RelayS
         false
     });
     fired
+}
+
+pub(crate) fn is_lead_briefing_notify(event: &CoordEvent) -> bool {
+    if event.kind != "notify" || !event.from.eq_ignore_ascii_case("system") {
+        return false;
+    }
+    let m = event.message.as_str();
+    m.contains("【协调规则·")
+        || m.contains("【Lead 提醒·")
+        || m.contains("【协调规则·Lead")
 }
 
 pub fn format_injection(event: &CoordEvent) -> String {
@@ -150,6 +160,10 @@ pub fn dispatch(
 
     for event in pending {
         if event.kind == "claim" {
+            state.cursor = event.line_no;
+            continue;
+        }
+        if is_lead_briefing_notify(event) {
             state.cursor = event.line_no;
             continue;
         }
@@ -262,6 +276,21 @@ mod tests {
             format_injection(&event),
             "[协调/mimo->claude] 请 review"
         );
+    }
+
+    #[test]
+    fn skips_lead_briefing_relay() {
+        let event = CoordEvent {
+            line_no: 1,
+            time: None,
+            kind: "notify".into(),
+            agent: Some("cursor".into()),
+            message: "【协调规则·Lead 身份】你是 Lead".into(),
+            from: "system".into(),
+            task: None,
+            action: None,
+        };
+        assert!(is_lead_briefing_notify(&event));
     }
 
     #[test]

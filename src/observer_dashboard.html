@@ -83,6 +83,7 @@
     <span class="meta" id="updated">—</span>
     <span class="meta" id="project">—</span>
   </header>
+  <div id="workflow" style="display:none;margin:0 1rem 0.5rem;padding:0.65rem 0.85rem;background:var(--panel);border:1px solid var(--border);border-radius:8px;font-size:0.85rem;"></div>
   <div id="err"></div>
   <div class="grid">
     <section><h2>Agents</h2><div class="body" id="agents"></div></section>
@@ -124,6 +125,15 @@
       document.getElementById('lead').textContent = 'Lead: ' + s.lead;
       document.getElementById('updated').textContent = 'Updated: ' + (s.generated_at || '').slice(11, 19);
       document.getElementById('project').textContent = s.project_dir;
+      const wf = s.workflow || {};
+      const wfEl = document.getElementById('workflow');
+      if (wf.title) {
+        wfEl.style.display = 'block';
+        const cmd = wf.command ? `<div style="margin-top:0.35rem;color:var(--accent);font-family:ui-monospace,Consolas,monospace;">${esc(wf.command)}</div>` : '<div style="margin-top:0.35rem;color:var(--muted);">（无需命令 — TUI 自动处理）</div>';
+        wfEl.innerHTML = `<strong style="color:var(--ok);">${esc(wf.title)}</strong> · ${esc(wf.detail)}<div style="margin-top:0.25rem;color:var(--muted);">${esc(wf.action)}</div>${cmd}`;
+      } else {
+        wfEl.style.display = 'none';
+      }
       document.getElementById('agents').innerHTML = renderAgents(s.agents || []);
       document.getElementById('tasks').innerHTML = renderTasks(s.tasks || []);
       document.getElementById('retry').innerHTML = renderRetry(s.retry_queue || []);

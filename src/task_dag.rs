@@ -251,37 +251,133 @@ pub fn flush_pending_after_complete(
 mod tests {
     use super::*;
 
+    fn item(worker: &str, task: &str, deps: &[&str]) -> PlanItem {
+        PlanItem {
+            worker: worker.into(),
+            task: task.into(),
+            description: String::new(),
+            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agent-tui-dag-{}-{}",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(dir.join(".agents/shared")).unwrap();
+        dir
+    }
+
     #[test]
     fn deps_block_until_complete() {
         let mut done = HashSet::new();
-        let item = PlanItem {
-            worker: "kimi".into(),
-            task: "ui".into(),
-            description: String::new(),
-            depends_on: vec!["api".into()],
-        };
+        let item = item("kimi", "ui", &["api"]);
         assert!(!deps_satisfied(&item, &done));
         done.insert("api".into());
         assert!(deps_satisfied(&item, &done));
     }
 
     #[test]
+    fn empty_deps_is_always_ready() {
+        let i = item("kimi", "solo", &[]);
+        assert!(deps_satisfied(&i, &HashSet::new()));
+    }
+
+    #[test]
+    fn deps_match_case_insensitively() {
+        let mut done = HashSet::new();
+        done.insert("API".into());
+        let i = item("kimi", "ui", &["api"]);
+        assert!(deps_satisfied(&i, &done));
+
+        let i2 = item("kimi", "ui", &["Api"]);
+        assert!(deps_satisfied(&i2, &done));
+    }
+
+    #[test]
+    fn plan_key_lowercases_worker_only() {
+        let i = item("Codex", "Build-UI", &[]);
+        assert_eq!(plan_key(&i), "codex:Build-UI");
+    }
+
+    #[test]
     fn detects_simple_cycle() {
-        let plans = vec![
-            PlanItem {
-                worker: "codex".into(),
-                task: "a".into(),
-                description: String::new(),
-                depends_on: vec!["b".into()],
-            },
-            PlanItem {
-                worker: "kimi".into(),
-                task: "b".into(),
-                description: String::new(),
-                depends_on: vec!["a".into()],
-            },
-        ];
+        let plans = vec![item("codex", "a", &["b"]), item("kimi", "b", &["a"])];
         assert!(find_dependency_cycle(&plans).is_some());
         assert!(validate_no_dependency_cycles(&plans).is_err());
+    }
+
+    #[test]
+    fn detects_self_cycle() {
+        let plans = vec![item("codex", "a", &["a"])];
+        assert!(find_dependency_cycle(&plans).is_some());
+    }
+
+    #[test]
+    fn no_cycle_in_three_hop_chain() {
+        let plans = vec![
+            item("codex", "c", &["b"]),
+            item("kimi", "b", &["a"]),
+            item("mimo", "a", &[]),
+        ];
+        assert!(find_dependency_cycle(&plans).is_none());
+        assert!(validate_no_dependency_cycles(&plans).is_ok());
+    }
+
+    #[test]
+    fn pending_plans_roundtrip_through_disk() {
+        let dir = temp_dir("roundtrip");
+        let plans = vec![
+            item("codex", "t1", &[]),
+            item("kimi", "t2", &["t1"]),
+        ];
+        save_pending_plans(&dir, &plans).unwrap();
+        let loaded = load_pending_plans(&dir);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].task, "t1");
+        assert_eq!(loaded[1].depends_on, vec!["t1".to_string()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schedule_dedupes_by_key_and_persists_blocked() {
+        let dir = temp_dir("schedule");
+        let completed = HashSet::new();
+        let incoming = vec![
+            item("codex", "ui", &["api"]),
+            item("Codex", "ui", &["api"]), // dup (worker lowercased)
+            item("kimi", "api", &[]),
+        ];
+        let (ready, still) = schedule_plans(&dir, incoming, &completed).unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].task, "api");
+        assert_eq!(still.len(), 1);
+        assert_eq!(still[0].task, "ui");
+        // persisted
+        let reloaded = load_pending_plans(&dir);
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded[0].task, "ui");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flush_promotes_blocked_after_dep_completes() {
+        let dir = temp_dir("flush");
+        let plans = vec![item("codex", "ui", &["api"]), item("kimi", "api", &[])];
+        let (ready, _) = schedule_plans(&dir, plans, &HashSet::new()).unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].task, "api");
+
+        let mut completed = HashSet::new();
+        completed.insert("api".into());
+        let promoted = flush_pending_after_complete(&dir, &completed).unwrap();
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(promoted[0].task, "ui");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -37,6 +37,7 @@ fn open_db(project_dir: &Path) -> Result<Connection> {
 pub struct MemoryHit {
     pub agent: String,
     pub source: String,
+    #[allow(dead_code)]
     pub path: String,
     pub snippet: String,
 }
@@ -69,6 +70,44 @@ pub fn index_agent(project_dir: &Path, agent: &str) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// Rebuild the full memory FTS index when source files changed (skip on restart if fresh).
+pub fn maybe_reindex_on_startup(project_dir: &Path) -> Result<usize> {
+    if std::env::var("AGENT_TUI_FTS_ALWAYS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return reindex_all(project_dir);
+    }
+    if !needs_full_reindex(project_dir)? {
+        return Ok(0);
+    }
+    reindex_all(project_dir)
+}
+
+fn needs_full_reindex(project_dir: &Path) -> Result<bool> {
+    let db = db_path(project_dir);
+    if !db.is_file() {
+        return Ok(true);
+    }
+    let db_mtime = fs::metadata(&db)
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let agents = config::load_agents(project_dir)?;
+    for spec in &agents {
+        for (_, path) in sources_for_agent(project_dir, &spec.name) {
+            let Ok(meta) = fs::metadata(&path) else {
+                continue;
+            };
+            if let Ok(mtime) = meta.modified() {
+                if mtime > db_mtime {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Rebuild the full memory FTS index for all configured agents.

@@ -220,8 +220,7 @@ pub fn history_bias(
     let stats = ws
         .by_category
         .get(&cat)
-        .or(Some(&ws.overall))
-        .unwrap();
+        .unwrap_or(&ws.overall);
     let Some(rate) = success_rate(stats) else {
         return 0;
     };
@@ -319,7 +318,7 @@ pub fn maybe_auto_evolve(project_dir: &Path) -> Result<()> {
         return Ok(());
     }
     let n = load_outcomes(project_dir, 10_000).len();
-    if n > 0 && n % 10 == 0 {
+    if n > 0 && n.is_multiple_of(10) {
         let _ = patch_strengths_history(project_dir);
     }
     Ok(())

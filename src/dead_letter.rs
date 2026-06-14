@@ -246,6 +246,7 @@ pub fn record_and_maybe_retry(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn schedule_retry(
     project_dir: &Path,
     lead: &str,
@@ -470,17 +471,160 @@ pub fn format_dead_letter(r: &DeadLetterRecord) -> String {
 mod tests {
     use super::*;
 
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agent-tui-dl-{}-{}",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(dir.join(".agents/shared")).unwrap();
+        dir
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn write_agents(dir: &Path) {
+        let body = "agents:\n  claude:\n    command: \"claude\"\n    enabled: true\n  codex:\n    command: \"codex\"\n    enabled: true\n  kimi:\n    command: \"kimi\"\n    enabled: true\n  mimo:\n    command: \"mimo\"\n    enabled: false\n";
+        fs::write(dir.join(".agents").join("agents.yaml"), body).unwrap();
+    }
+
     #[test]
     fn backoff_modes() {
-        std::env::set_var("AGENT_TUI_RETRY_BACKOFF", "exponential");
-        std::env::set_var("AGENT_TUI_RETRY_COOLDOWN_SECS", "10");
+        let _b = EnvGuard::set("AGENT_TUI_RETRY_BACKOFF", "exponential");
+        let _c = EnvGuard::set("AGENT_TUI_RETRY_COOLDOWN_SECS", "10");
         assert_eq!(compute_cooldown_secs(1), 10);
         assert_eq!(compute_cooldown_secs(2), 20);
         assert_eq!(compute_cooldown_secs(3), 40);
+        // Saturates at attempt 7+ (exp capped at 6)
+        assert_eq!(compute_cooldown_secs(7), 640);
+        assert_eq!(compute_cooldown_secs(100), 640);
+        // Attempt 0 does not underflow
+        assert_eq!(compute_cooldown_secs(0), 10);
 
-        std::env::set_var("AGENT_TUI_RETRY_BACKOFF", "fixed");
-        std::env::set_var("AGENT_TUI_RETRY_COOLDOWN_SECS", "30");
+        let _b2 = EnvGuard::set("AGENT_TUI_RETRY_BACKOFF", "fixed");
+        let _c2 = EnvGuard::set("AGENT_TUI_RETRY_COOLDOWN_SECS", "30");
         assert_eq!(compute_cooldown_secs(1), 30);
         assert_eq!(compute_cooldown_secs(3), 30);
+    }
+
+    #[test]
+    fn max_retries_clamps_to_five() {
+        let _g = EnvGuard::set("AGENT_TUI_MAX_RETRIES", "99");
+        assert_eq!(max_retries(), 5);
+        let _g2 = EnvGuard::set("AGENT_TUI_MAX_RETRIES", "bogus");
+        assert_eq!(max_retries(), 2); // default on parse failure
+    }
+
+    #[test]
+    fn dead_letters_roundtrip_respects_limit() {
+        let dir = temp_dir("roundtrip");
+        let path = dead_letter_path(&dir);
+        let mut body = String::new();
+        for i in 0..5 {
+            let rec = DeadLetterRecord {
+                time: format!("t{i}"),
+                task: format!("task-{i}"),
+                worker: "codex".into(),
+                lead: "claude".into(),
+                status: "failed".into(),
+                summary: format!("err{i}"),
+                attempt: 1,
+            };
+            body.push_str(&serde_json::to_string(&rec).unwrap());
+            body.push('\n');
+        }
+        fs::write(&path, body).unwrap();
+
+        let all = load_dead_letters(&dir, 100);
+        assert_eq!(all.len(), 5);
+        // Order preserved chronologically (not reversed)
+        assert_eq!(all[0].task, "task-0");
+        assert_eq!(all[4].task, "task-4");
+
+        let limited = load_dead_letters(&dir, 2);
+        assert_eq!(limited.len(), 2);
+        // Tail semantics: last N records, still in chronological order
+        assert_eq!(limited[0].task, "task-3");
+        assert_eq!(limited[1].task, "task-4");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pending_retry_count_filters_by_task() {
+        let dir = temp_dir("pending");
+        let path = retry_queue_path(&dir);
+        let mut body = String::new();
+        for (task, worker) in [("t1", "codex"), ("t1", "kimi"), ("t2", "codex")] {
+            let rec = RetryRecord {
+                time: "t".into(),
+                due: "t".into(),
+                task: task.into(),
+                worker: worker.into(),
+                lead: "claude".into(),
+                description: String::new(),
+                attempt: 1,
+                previous_worker: None,
+                cooldown_secs: None,
+            };
+            body.push_str(&serde_json::to_string(&rec).unwrap());
+            body.push('\n');
+        }
+        fs::write(&path, body).unwrap();
+        assert_eq!(pending_retry_count(&dir, "t1"), 2);
+        assert_eq!(pending_retry_count(&dir, "t2"), 1);
+        assert_eq!(pending_retry_count(&dir, "t9"), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn worker_pool_excludes_lead_and_disabled() {
+        let dir = temp_dir("pool");
+        write_agents(&dir);
+        let pool = worker_pool(&dir, "claude");
+        assert!(!pool.iter().any(|w| w == "claude"));
+        // mimo is enabled:false → excluded
+        assert!(!pool.iter().any(|w| w == "mimo"));
+        // codex & kimi present
+        assert!(pool.iter().any(|w| w == "codex"));
+        assert!(pool.iter().any(|w| w == "kimi"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retry_worker_rotates_round_robin() {
+        let _g = EnvGuard::set("AGENT_TUI_RETRY_ROTATE_WORKER", "true");
+        let dir = temp_dir("rotate");
+        write_agents(&dir);
+        // Pool order (sorted by PREFERRED_ORDER then name): codex, kimi (claude excluded as lead)
+        let w1 = pick_retry_worker(&dir, "claude", "codex", 1);
+        let w2 = pick_retry_worker(&dir, "claude", "codex", 2);
+        assert_ne!(w1, w2);
+        assert_ne!(w1, "claude");
+        assert_ne!(w2, "claude");
+        // Wraps around on attempt == pool.len()
+        let w_wrap = pick_retry_worker(&dir, "claude", "codex", 3);
+        assert_eq!(w_wrap, pick_retry_worker(&dir, "claude", "codex", 1));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

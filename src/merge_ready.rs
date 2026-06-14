@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::meta;
-use crate::review_gate::{is_batch_review_task, is_review_task};
+use crate::review_gate::is_meta_task;
 use crate::task_state;
 use crate::terminal;
 
@@ -50,7 +50,7 @@ pub fn evaluate(project_dir: &Path) -> MergeReadyStatus {
 
     let mut impl_tasks: BTreeSet<String> = BTreeSet::new();
     for (task, s) in &snap {
-        if is_review_task(task) || is_batch_review_task(task) || task.ends_with("-unblock") {
+        if is_meta_task(task) || crate::verify_cleanup::is_verify_artifact_task(task) {
             continue;
         }
         if let Some(ref prefix) = batch {
@@ -99,6 +99,11 @@ fn batch_fingerprint(tasks: &[String]) -> String {
     sorted.join(",")
 }
 
+/// Stable fingerprint for a done-task set (merge-ready / smoke / auto-pr dedupe).
+pub fn done_tasks_fingerprint(tasks: &[String]) -> String {
+    batch_fingerprint(tasks)
+}
+
 fn already_notified(project_dir: &Path, fingerprint: &str) -> bool {
     let path = notified_path(project_dir);
     let Ok(content) = fs::read_to_string(path) else {
@@ -115,6 +120,11 @@ fn remember_notified(project_dir: &Path, fingerprint: &str) -> Result<()> {
     let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
     writeln!(f, "{fingerprint}")?;
     Ok(())
+}
+
+/// True when merge-ready notification was already sent for this done-task set.
+pub fn was_notified_for_done_tasks(project_dir: &Path, done_tasks: &[String]) -> bool {
+    already_notified(project_dir, &batch_fingerprint(done_tasks))
 }
 
 /// Notify Lead once per unique done-task set when merge-ready.
@@ -154,7 +164,7 @@ pub fn notify_lead_if_ready(project_dir: &Path, lead: &str) -> Result<bool> {
     let task_list = status.done_tasks.join(", ");
     let body = format!(
         "【merge-ready】全部子任务已 review 通过：{task_list}。\n\
-         ▶ Lead 行动：确认 diff → `agent-tui pr-create` 或 agents-complete merge → 输出 agent-plan 派发合并后验证（reviewer smoke）。\n\
+         ▶ Lead 行动：确认 diff → smoke 验证通过后 `agent-tui pr-create` / `agent-tui merge --all`（或设 AGENT_TUI_AUTO_PR=1 自动开 PR）。\n\
          勿问用户是否合并 — 默认进入合并准备。"
     );
     meta::notify_agent_from(project_dir, lead, &body, "agent-tui")?;
@@ -163,12 +173,22 @@ pub fn notify_lead_if_ready(project_dir: &Path, lead: &str) -> Result<bool> {
         &format!("agent-tui → {lead} merge-ready（{task_list}）"),
     )?;
     remember_notified(project_dir, &fp)?;
+    if let Ok(Some(msg)) = crate::project_map::maybe_refresh(project_dir) {
+        terminal::log_message(project_dir, "info", &msg);
+    }
     terminal::log_message(
         project_dir,
         "info",
         &format!("merge-ready: 已通知 {lead}（{task_list}）"),
     );
     let _ = crate::delegation_stats::evolve_project(project_dir);
+
+    if crate::post_merge_smoke::post_merge_smoke_enabled() {
+        let _ = crate::post_merge_smoke::dispatch_smoke(project_dir, lead, &status.done_tasks)?;
+    } else {
+        let _ = crate::auto_pr::maybe_create(project_dir, &status.done_tasks)?;
+    }
+
     Ok(true)
 }
 

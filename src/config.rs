@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use regex::Regex;
 use serde::Deserialize;
 
-pub const PREFERRED_ORDER: &[&str] = &["cursor", "claude", "codex", "mimo", "kimi"];
+pub const PREFERRED_ORDER: &[&str] = &["claude", "codex", "mimo", "kimi", "cursor"];
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentsFile {
@@ -251,6 +251,12 @@ pub fn apply_agent_tui_env(
         cmd.env(
             "AGENT_TUI_LEAD_PLAYBOOK",
             normalize_windows_path(project_dir.join(".agents/LEAD.md"))
+                .to_string_lossy()
+                .to_string(),
+        );
+        cmd.env(
+            "AGENT_TUI_PROJECT_MAP",
+            normalize_windows_path(project_dir.join(crate::project_map::MAP_REL_PATH))
                 .to_string_lossy()
                 .to_string(),
         );

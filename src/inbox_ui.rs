@@ -11,10 +11,15 @@ use crate::claims;
 use crate::delegation;
 use crate::lead_watch;
 use crate::meta::{self, InboxCommand};
+use crate::ops::{self, OpsVerb};
 
 pub struct InboxKeyOutcome {
     pub consumed: bool,
     pub status: Option<String>,
+    /// Open guide/next overlay without leaving TUI.
+    pub side_effect: Option<OpsVerb>,
+    /// Dangerous op awaiting Y/N confirm panel.
+    pub pending_confirm: Option<OpsVerb>,
 }
 
 impl InboxKeyOutcome {
@@ -22,6 +27,8 @@ impl InboxKeyOutcome {
         Self {
             consumed: false,
             status: None,
+            side_effect: None,
+            pending_confirm: None,
         }
     }
 
@@ -29,6 +36,26 @@ impl InboxKeyOutcome {
         Self {
             consumed: true,
             status,
+            side_effect: None,
+            pending_confirm: None,
+        }
+    }
+
+    pub fn with_side_effect(status: Option<String>, side_effect: OpsVerb) -> Self {
+        Self {
+            consumed: true,
+            status,
+            side_effect: Some(side_effect),
+            pending_confirm: None,
+        }
+    }
+
+    pub fn with_confirm(status: Option<String>, verb: OpsVerb) -> Self {
+        Self {
+            consumed: true,
+            status,
+            side_effect: None,
+            pending_confirm: Some(verb),
         }
     }
 }
@@ -90,6 +117,8 @@ impl InboxPanel {
                 } else {
                     String::new()
                 }),
+                side_effect: None,
+                pending_confirm: None,
             };
         }
 
@@ -104,6 +133,34 @@ impl InboxPanel {
             }
             KeyCode::Enter => {
                 let raw = std::mem::take(&mut self.input);
+                if let Some(verb) = ops::parse_ops_line(&raw) {
+                    if ops::is_show_panel(&verb) {
+                        return InboxKeyOutcome::with_side_effect(
+                            Some(match verb {
+                                OpsVerb::ShowGuide => "速查".into(),
+                                OpsVerb::ShowNext => "当前进度".into(),
+                                _ => String::new(),
+                            }),
+                            verb,
+                        );
+                    }
+                    if ops::requires_confirmation(&verb) {
+                        return InboxKeyOutcome::with_confirm(
+                            Some("请确认操作（Y/N）".into()),
+                            verb,
+                        );
+                    }
+                    let result = ops::execute(project_dir, lead_agent, verb);
+                    match result {
+                        Ok(status) => {
+                            self.refresh(project_dir);
+                            return InboxKeyOutcome::handled(Some(truncate_status(&status)));
+                        }
+                        Err(e) => {
+                            return InboxKeyOutcome::handled(Some(format!("操作失败：{e:#}")));
+                        }
+                    }
+                }
                 let result = match meta::parse_inbox_command(
                     &raw,
                     agent_names,
@@ -211,7 +268,7 @@ impl InboxPanel {
             .border_style(Style::default().fg(Color::Magenta))
             .style(Style::default().bg(Color::Black));
         let inner = block.inner(area);
-        let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(inner);
+        let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(2)]).split(inner);
 
         let visible_rows = chunks[0].height.saturating_sub(1) as usize;
         let total = self.lines.len();
@@ -222,10 +279,16 @@ impl InboxPanel {
         };
 
         let content: Vec<Line> = if self.lines.is_empty() {
-            vec![Line::from(Span::styled(
-                "（暂无留言，直接输入后按 Enter）",
-                Style::default().fg(Color::DarkGray),
-            ))]
+            vec![
+                Line::from(Span::styled(
+                    "示例：!任务 实现登录页",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::styled(
+                    "      !doctor 体检  |  !guide 速查",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]
         } else {
             self.lines[start..]
                 .iter()
@@ -271,9 +334,20 @@ fn truncate_line(s: &str, max_cols: usize) -> String {
     out
 }
 
+fn truncate_status(s: &str) -> String {
+    const MAX: usize = 200;
+    if s.chars().count() <= MAX {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(MAX).collect();
+    out.push('…');
+    out
+}
+
 fn render_input(f: &mut Frame, area: Rect, input: &str) {
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
     let prompt = if input.is_empty() {
-        "输入消息 / !任务 描述需求，Enter 发送".to_string()
+        "> !任务 / !map / !doctor …  Enter 发送".to_string()
     } else {
         format!("> {input}_")
     };
@@ -284,5 +358,14 @@ fn render_input(f: &mut Frame, area: Rect, input: &str) {
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD)
     };
-    f.render_widget(Paragraph::new(prompt).style(style), area);
+    f.render_widget(Paragraph::new(prompt).style(style), rows[0]);
+    if let Some(hint) = ops::inbox_hint(input) {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                hint,
+                Style::default().fg(Color::Cyan),
+            ))),
+            rows[1],
+        );
+    }
 }

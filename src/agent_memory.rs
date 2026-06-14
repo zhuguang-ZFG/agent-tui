@@ -37,6 +37,7 @@ pub enum MemoryEventKind {
     Delegate,
     Report,
     Briefing,
+    #[allow(dead_code)]
     PaneRestart,
 }
 
@@ -74,13 +75,11 @@ fn memory_template(agent: &str, role: &str, lead: &str, project_dir: &Path) -> S
     let coord = project_dir.join(".agents/COORDINATION.md");
     let is_lead = agent.eq_ignore_ascii_case(lead);
     let lead_block = if is_lead {
-        format!(
-            "- **你是唯一 Lead（Orchestrator）**：想、拆、派、验、续 — 不是普通码农\n\
+        "- **你是唯一 Lead（Orchestrator）**：想、拆、派、验、续 — 不是普通码农\n\
              - 输出 `agent-plan` = 下命令；TUI 自动 delegate 给工人\n\
              - 收到 `【回执·…】` → **同一轮**内续派 agent-plan，**禁止**问用户是否继续\n\
-             - 必读：worktree `.cursor/rules/agent-tui-orchestrator.mdc` + `.agents/LEAD.md`\n\
-             - Playbook 环境变量：`AGENT_TUI_LEAD_PLAYBOOK`\n"
-        )
+             - 必读：worktree `.cursor/rules/agent-tui-orchestrator.mdc` + `.agents/LEAD.md` + `.agents/PROJECT_MAP.md`\n\
+             - Playbook 环境变量：`AGENT_TUI_LEAD_PLAYBOOK`；项目地图：`AGENT_TUI_PROJECT_MAP`\n".to_string()
     } else {
         String::from(
             "- 你是 **工人**：收到 `【委派·task】` 立即开工，完成后输出 `agent-report`\n\

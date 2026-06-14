@@ -28,9 +28,12 @@ use crate::task_state;
 pub struct VerifyOutcome {
     pub task: String,
     pub plan_parsed: usize,
+    #[allow(dead_code)]
     pub delegated: bool,
     pub report_parsed: usize,
+    #[allow(dead_code)]
     pub reported: bool,
+    #[allow(dead_code)]
     pub memory_ok: bool,
 }
 
@@ -39,6 +42,7 @@ pub struct RetryVerifyOutcome {
     pub failed_worker: String,
     pub retry_worker: String,
     pub dead_letter_attempt: u32,
+    #[allow(dead_code)]
     pub retries_executed: usize,
 }
 
@@ -371,10 +375,10 @@ pub fn verify_failed_retry_chain(project_dir: &Path) -> Result<RetryVerifyOutcom
         .filter(|e| e.kind == "delegate" && e.task.as_deref() == Some(task.as_str()))
         .map(|e| e.to.as_str())
         .collect();
-    if !delegate_workers.iter().any(|w| *w == failed_worker) {
+    if !delegate_workers.contains(&failed_worker) {
         bail!("mailbox missing initial delegate to {failed_worker}");
     }
-    if !delegate_workers.iter().any(|w| *w == expected_retry_worker.as_str()) {
+    if !delegate_workers.contains(&expected_retry_worker.as_str()) {
         bail!(
             "mailbox missing retry delegate to {expected_retry_worker}, got {delegate_workers:?}"
         );
@@ -578,7 +582,7 @@ pub fn verify_lead_transcript_followup_chain(project_dir: &Path) -> Result<()> {
 "#
     );
 
-    let mut lead_watch = lead_watch::LeadWatchState::new(project_dir);
+    let mut lead_watch = lead_watch::LeadWatchState::new(project_dir, &lead);
     let outcome = lead_followup::process_transcript_text(
         project_dir,
         &lead,
@@ -645,6 +649,7 @@ pub fn verify_relay_cursor_hold() -> Result<()> {
 /// Plan fingerprints survive LeadWatchState restart (persistent dedupe).
 pub fn verify_persistent_plan_dedupe(project_dir: &Path) -> Result<()> {
     let agents = load_agents(project_dir)?;
+    let lead = resolve_lead_agent(&agents);
     let names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
     let task = unique_task("dedupe-plan");
     let text = format!(
@@ -654,7 +659,7 @@ pub fn verify_persistent_plan_dedupe(project_dir: &Path) -> Result<()> {
 ```
 "#
     );
-    let mut first = lead_watch::LeadWatchState::new(project_dir);
+    let mut first = lead_watch::LeadWatchState::new(project_dir, &lead);
     let n1 = lead_watch::plans_from_text(
         &text,
         &names,
@@ -664,7 +669,7 @@ pub fn verify_persistent_plan_dedupe(project_dir: &Path) -> Result<()> {
     if n1.len() != 1 {
         bail!("persistent dedupe: expected 1 plan item, got {}", n1.len());
     }
-    let mut second = lead_watch::LeadWatchState::new(project_dir);
+    let mut second = lead_watch::LeadWatchState::new(project_dir, &lead);
     let n2 = lead_watch::plans_from_text(
         &text,
         &names,
@@ -820,6 +825,8 @@ pub fn verify_relay_cursor_persist(project_dir: &Path) -> Result<()> {
         events_cursor: before.events_cursor.saturating_add(1000),
         mailbox_line: before.mailbox_line.saturating_add(1000),
         plan_inbox_line: before.plan_inbox_line.saturating_add(1000),
+        initial_briefing_sent: before.initial_briefing_sent,
+        initial_briefing_lead: before.initial_briefing_lead.clone(),
     };
     coord_dedupe::save_relay_cursor(project_dir, &probe)?;
     let loaded = coord_dedupe::load_relay_cursor(project_dir);
@@ -839,7 +846,7 @@ pub fn verify_relay_cursor_persist(project_dir: &Path) -> Result<()> {
             relay.mailbox_line
         );
     }
-    let lw = lead_watch::LeadWatchState::new(project_dir);
+    let lw = lead_watch::LeadWatchState::new(project_dir, "cursor");
     if lw.plan_inbox_line() != probe.plan_inbox_line {
         bail!(
             "LeadWatchState plan_inbox_line expected {}",
@@ -969,7 +976,7 @@ pub fn verify_review_merge_chain() -> Result<()> {
         other => bail!("review gate: parent expected done after review, got {other:?}"),
     }
 
-    let batch_id = crate::batch_review::batch_review_task_id(&[task.clone()]);
+    let batch_id = crate::batch_review::batch_review_task_id(std::slice::from_ref(&task));
     match task_state::load_snapshots(&dir)
         .get(&batch_id)
         .map(|s| s.status.as_str())
@@ -991,12 +998,235 @@ pub fn verify_review_merge_chain() -> Result<()> {
         bail!("merge-ready: missing notify to lead");
     }
 
+    let smoke_id = crate::post_merge_smoke::smoke_task_id(std::slice::from_ref(&task));
+    match task_state::load_snapshots(&dir)
+        .get(&smoke_id)
+        .map(|s| s.status.as_str())
+    {
+        Some("delegated") => {}
+        other => bail!("post-merge smoke: expected delegated after merge-ready, got {other:?}"),
+    }
+
+    delegation::report_task_auto(&dir, "mimo", &lead, &smoke_id, "done", "smoke ok")?;
+
+    let wf = crate::workflow_phase::evaluate(&dir);
+    if wf.phase != crate::workflow_phase::Phase::MergeReady {
+        bail!(
+            "workflow after smoke: expected MergeReady, got {:?}",
+            wf.phase
+        );
+    }
+
     std::env::remove_var("AGENT_TUI_MERGE_BATCH");
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
 
+/// smoke 通过后 auto-pr 路径（无 gh 时跳过创建，仍验证门禁不 panic）。
+pub fn verify_smoke_auto_pr_chain() -> Result<()> {
+    let dir = std::env::temp_dir().join(format!("smoke-apr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    project_init::init_project(
+        &dir,
+        &InitOptions {
+            force: true,
+            link_worktrees: false,
+            sync_lead: false,
+            minimal: false,
+        },
+    )?;
+    let agents = load_agents(&dir)?;
+    let lead = resolve_lead_agent(&agents);
+    if !agents.iter().any(|a| a.name == "mimo") {
+        bail!("smoke auto-pr verify: need mimo reviewer");
+    }
+
+    std::env::set_var("AGENT_TUI_MERGE_BATCH", "smoke");
+    std::env::set_var("AGENT_TUI_AUTO_PR", "1");
+    std::env::remove_var("AGENT_TUI_REVIEW_GATE");
+    let _ = merge_ready::reset_notified(&dir);
+
+    let task = unique_task("smoke");
+    delegation::delegate_task(&dir, &lead, "codex", &task, "smoke 链验证")?;
+    delegation::report_task_auto(&dir, "codex", &lead, &task, "done", "ok")?;
+    let review_id = review_gate::review_task_id(&task);
+    delegation::report_task_auto(&dir, "mimo", &lead, &review_id, "done", "ok")?;
+    let batch_id = crate::batch_review::batch_review_task_id(std::slice::from_ref(&task));
+    delegation::report_task_auto(&dir, "mimo", &lead, &batch_id, "done", "ok")?;
+    let _ = merge_ready::notify_lead_if_ready(&dir, &lead)?;
+
+    let smoke_id = crate::post_merge_smoke::smoke_task_id(std::slice::from_ref(&task));
+    if !task_state::load_snapshots(&dir).contains_key(&smoke_id) {
+        bail!("smoke auto-pr: smoke task not dispatched");
+    }
+    delegation::report_task_auto(&dir, "mimo", &lead, &smoke_id, "done", "tests pass")?;
+
+    // auto_pr may skip without gh/feature branch — must not error
+    let _ = crate::auto_pr::maybe_create(&dir, std::slice::from_ref(&task))?;
+
+    let obs = observer::build_snapshot(&dir)?;
+    if obs.workflow.title.is_empty() {
+        bail!("observer workflow empty after smoke chain");
+    }
+
+    std::env::remove_var("AGENT_TUI_MERGE_BATCH");
+    std::env::remove_var("AGENT_TUI_AUTO_PR");
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// simulate PR merged → poll → post-github-merge → shipped.
+pub fn verify_pr_merged_chain() -> Result<()> {
+    let dir = std::env::temp_dir().join(format!("pr-merged-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    project_init::init_project(
+        &dir,
+        &InitOptions {
+            force: true,
+            link_worktrees: false,
+            sync_lead: false,
+            minimal: false,
+        },
+    )?;
+    let agents = load_agents(&dir)?;
+    let lead = resolve_lead_agent(&agents);
+
+    std::env::set_var("AGENT_TUI_MERGE_BATCH", "pmerge");
+    std::env::remove_var("AGENT_TUI_REVIEW_GATE");
+    let _ = merge_ready::reset_notified(&dir);
+
+    let task = unique_task("pmerge");
+    delegation::delegate_task(&dir, &lead, "codex", &task, "pr merged 链")?;
+    delegation::report_task_auto(&dir, "codex", &lead, &task, "done", "ok")?;
+    let review_id = review_gate::review_task_id(&task);
+    delegation::report_task_auto(&dir, "mimo", &lead, &review_id, "done", "ok")?;
+    let batch_id = crate::batch_review::batch_review_task_id(std::slice::from_ref(&task));
+    delegation::report_task_auto(&dir, "mimo", &lead, &batch_id, "done", "ok")?;
+    let _ = merge_ready::notify_lead_if_ready(&dir, &lead)?;
+
+    let smoke_id = crate::post_merge_smoke::smoke_task_id(std::slice::from_ref(&task));
+    delegation::report_task_auto(&dir, "mimo", &lead, &smoke_id, "done", "ok")?;
+
+    let fp = merge_ready::done_tasks_fingerprint(std::slice::from_ref(&task));
+    let ap_path = dir.join(".agents/shared/auto_pr_dispatched.jsonl");
+    std::fs::write(&ap_path, format!("{fp}\n"))?;
+
+    crate::pr_lifecycle::simulate_merged(&dir)?;
+    std::env::set_var("AGENT_TUI_POLL_PR", "1");
+    let polled = crate::pr_lifecycle::maybe_poll_merged(&dir, &lead)?;
+    if !polled {
+        bail!("pr merged: maybe_poll_merged expected true");
+    }
+
+    let gh_id = crate::pr_lifecycle::post_github_merge_task_id(std::slice::from_ref(&task));
+    match task_state::load_snapshots(&dir)
+        .get(&gh_id)
+        .map(|s| s.status.as_str())
+    {
+        Some("delegated") => {}
+        other => bail!("post-github-merge: expected delegated, got {other:?}"),
+    }
+
+    let events = meta::load_coord_events(&dir);
+    if !events.iter().any(|e| e.message.contains("【pr-merged】")) {
+        bail!("pr merged: missing notify");
+    }
+
+    delegation::report_task_auto(&dir, "mimo", &lead, &gh_id, "done", "main ok")?;
+    let wf = crate::workflow_phase::evaluate(&dir);
+    if wf.phase != crate::workflow_phase::Phase::Shipped {
+        bail!("workflow after post-github-merge: expected Shipped, got {:?}", wf.phase);
+    }
+
+    std::env::remove_var("AGENT_TUI_MERGE_BATCH");
+    std::env::remove_var("AGENT_TUI_POLL_PR");
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// CI pass simulate → auto-merge → poll → post-github-merge → shipped.
+pub fn verify_auto_merge_chain() -> Result<()> {
+    let dir = std::env::temp_dir().join(format!("auto-merge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    project_init::init_project(
+        &dir,
+        &InitOptions {
+            force: true,
+            link_worktrees: false,
+            sync_lead: false,
+            minimal: false,
+        },
+    )?;
+    let agents = load_agents(&dir)?;
+    let lead = resolve_lead_agent(&agents);
+
+    std::env::set_var("AGENT_TUI_MERGE_BATCH", "amerge");
+    std::env::remove_var("AGENT_TUI_REVIEW_GATE");
+    let _ = merge_ready::reset_notified(&dir);
+
+    let task = unique_task("amerge");
+    delegation::delegate_task(&dir, &lead, "codex", &task, "auto merge 链")?;
+    delegation::report_task_auto(&dir, "codex", &lead, &task, "done", "ok")?;
+    let review_id = review_gate::review_task_id(&task);
+    delegation::report_task_auto(&dir, "mimo", &lead, &review_id, "done", "ok")?;
+    let batch_id = crate::batch_review::batch_review_task_id(std::slice::from_ref(&task));
+    delegation::report_task_auto(&dir, "mimo", &lead, &batch_id, "done", "ok")?;
+    let _ = merge_ready::notify_lead_if_ready(&dir, &lead)?;
+
+    let smoke_id = crate::post_merge_smoke::smoke_task_id(std::slice::from_ref(&task));
+    delegation::report_task_auto(&dir, "mimo", &lead, &smoke_id, "done", "ok")?;
+
+    let fp = merge_ready::done_tasks_fingerprint(std::slice::from_ref(&task));
+    std::fs::write(
+        dir.join(".agents/shared/auto_pr_dispatched.jsonl"),
+        format!("{fp}\n"),
+    )?;
+
+    crate::pr_lifecycle::simulate_ci_pass(&dir)?;
+    std::env::set_var("AGENT_TUI_AUTO_MERGE", "1");
+    std::env::set_var("AGENT_TUI_POLL_PR", "1");
+
+    let merged = crate::pr_lifecycle::maybe_auto_merge(&dir, &lead)?;
+    if !merged {
+        bail!("auto-merge: maybe_auto_merge expected true");
+    }
+    if !crate::pr_lifecycle::was_auto_merge_dispatched(&dir, std::slice::from_ref(&task)) {
+        bail!("auto-merge: missing dispatched fingerprint");
+    }
+
+    let events = meta::load_coord_events(&dir);
+    if !events.iter().any(|e| e.message.contains("【auto-merge】")) {
+        bail!("auto-merge: missing notify");
+    }
+
+    let polled = crate::pr_lifecycle::maybe_poll_merged(&dir, &lead)?;
+    if !polled {
+        bail!("auto-merge: maybe_poll_merged expected true after simulate merge");
+    }
+
+    let gh_id = crate::pr_lifecycle::post_github_merge_task_id(std::slice::from_ref(&task));
+    delegation::report_task_auto(&dir, "mimo", &lead, &gh_id, "done", "main ok")?;
+    let wf = crate::workflow_phase::evaluate(&dir);
+    if wf.phase != crate::workflow_phase::Phase::Shipped {
+        bail!(
+            "auto-merge workflow: expected Shipped, got {:?}",
+            wf.phase
+        );
+    }
+
+    std::env::remove_var("AGENT_TUI_MERGE_BATCH");
+    std::env::remove_var("AGENT_TUI_AUTO_MERGE");
+    std::env::remove_var("AGENT_TUI_POLL_PR");
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
 pub fn run_all(project_dir: &Path) -> Result<()> {
+    let _pre = crate::verify_cleanup::cleanup_verify_artifacts(project_dir)
+        .context("pre-cleanup verify artifacts")?;
     verify_parsers().context("parser checks")?;
     verify_relay_cursor_hold().context("relay cursor hold")?;
     verify_persistent_plan_dedupe(project_dir).context("persistent plan dedupe")?;
@@ -1011,7 +1241,10 @@ pub fn run_all(project_dir: &Path) -> Result<()> {
     verify_lead_identity_sync(project_dir).context("lead identity sync")?;
     verify_relay_cursor_persist(project_dir).context("relay cursor persist")?;
     verify_blocked_escalation(project_dir).context("blocked advisor escalate")?;
-    verify_review_merge_chain().context("review gate + merge-ready")?;
+    verify_review_merge_chain().context("review gate + merge-ready + smoke")?;
+    verify_smoke_auto_pr_chain().context("smoke + auto-pr + observer workflow")?;
+    verify_pr_merged_chain().context("pr merged poll + post-github-merge")?;
+    verify_auto_merge_chain().context("auto-merge ci gate + shipped")?;
     verify_evolution_records(project_dir).context("delegation evolution")?;
     crate::project_init::verify_init_scaffold().context("init scaffold")?;
     observer::verify_http_snapshot(project_dir).context("observer HTTP")?;
@@ -1020,6 +1253,16 @@ pub fn run_all(project_dir: &Path) -> Result<()> {
     if !snap.tasks.iter().any(|t| t.task == outcome.task && t.status == "done") {
         anyhow::bail!("observer snapshot missing done task {}", outcome.task);
     }
+
+    let cleanup = crate::verify_cleanup::cleanup_verify_artifacts(project_dir)
+        .context("cleanup verify artifacts")?;
+    if cleanup.tasks_removed > 0 {
+        println!(
+            "  cleanup: 已移除 {} 条 verify-loop 残留",
+            cleanup.tasks_removed
+        );
+    }
+
     println!("闭环验证通过");
     println!("  任务 ID: {}", outcome.task);
     println!("  agent-plan 解析: {} 条", outcome.plan_parsed);
@@ -1049,7 +1292,10 @@ pub fn run_all(project_dir: &Path) -> Result<()> {
     println!("  strength delegate: UI→codex 错配提示 ✓");
     println!("  relay persist: relay_cursor.json 重启恢复 ✓");
     println!("  blocked: max nudges → advisor 自动升级 ✓");
-    println!("  review gate: done → task-review → batch-review → merge-ready ✓");
+    println!("  review gate: done → task-review → batch-review → merge-ready → smoke ✓");
+    println!("  smoke/auto-pr: smoke 门禁 → workflow/observer 阶段 ✓");
+    println!("  pr-merged: poll → post-github-merge → shipped ✓");
+    println!("  auto-merge: CI/review 门禁 → merge → shipped ✓");
     println!("  evolution: outcomes → STRENGTHS 历史表现 ✓");
     println!("  init scaffold: 任意目录 agent-tui init ✓");
     println!("  relay: PTY 未就绪时不推进游标 ✓");

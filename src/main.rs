@@ -1,3 +1,9 @@
+mod batch_reset;
+mod confirm_panel;
+mod specialists;
+mod project_map;
+mod batch_group;
+mod routing;
 mod batch_review;
 mod agent_memory;
 mod agent_strengths;
@@ -11,6 +17,9 @@ mod delegation;
 mod delegation_stats;
 mod event_timeline;
 mod events_ui;
+mod guide;
+mod help_panel;
+mod ops;
 mod health;
 mod inbox_ui;
 mod lead_followup;
@@ -20,9 +29,13 @@ mod mailbox;
 mod mailbox_relay;
 mod memory_fts;
 mod merge_ready;
+mod auto_pr;
+mod merge;
+mod post_merge_smoke;
 mod meta;
 mod plan_inbox;
 mod pr_create;
+mod pr_lifecycle;
 mod project_init;
 mod observer;
 mod pane;
@@ -37,7 +50,9 @@ mod tasks_ui;
 mod terminal;
 mod ui;
 mod verify_live;
+mod verify_cleanup;
 mod verify_loop;
+mod workflow_phase;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -48,7 +63,11 @@ use crossterm::event::Event;
 use ratatui::DefaultTerminal;
 
 #[derive(Parser, Debug)]
-#[command(name = "agent-tui", about = "Windows 原生多 Agent 控制台（vt100）")]
+#[command(
+    name = "agent-tui",
+    about = "Windows 原生多 Agent 控制台（vt100）",
+    after_help = "只记一条：在项目目录运行 agent-tui 或 agent-tui up（自动 init + 进 TUI）"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -65,9 +84,9 @@ struct Cli {
     #[arg(long)]
     agent: Option<String>,
 
-    /// Show 4-pane grid on startup (default: solo — one agent fullscreen)
+    /// Start solo fullscreen on one agent (default: grid — all enabled agents visible)
     #[arg(long)]
-    grid: bool,
+    solo: bool,
 
     /// Load config and print agents, then exit (no TUI)
     #[arg(long)]
@@ -76,6 +95,17 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// 一条命令：未初始化则自动 init，然后启动 TUI（推荐）
+    Up {
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+        #[arg(long)]
+        max_agents: Option<usize>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        solo: bool,
+    },
     /// Agent 间发消息（写入 inbox + events，TUI 运行时会自动注入 PTY）
     Notify {
         /// 目标 Agent
@@ -107,11 +137,13 @@ enum Commands {
         #[arg(long)]
         project_dir: Option<PathBuf>,
     },
-    /// 工人向主 Agent 回执
+    /// 工人向主 Agent 回执（加 --status 则更新 task_state）
     Report {
         message: String,
         #[arg(long)]
         task: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
         #[arg(long)]
         to: Option<String>,
         #[arg(long, default_value = "user")]
@@ -185,6 +217,11 @@ enum Commands {
         #[arg(long)]
         project_dir: Option<PathBuf>,
     },
+    /// 生成或刷新 `.agents/PROJECT_MAP.md`（项目结构速览）
+    Map {
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
     /// 在当前/指定项目脚手架 `.agents/`（agents.yaml + COORDINATION + sync-lead）
     Init {
         #[arg(long)]
@@ -204,6 +241,16 @@ enum Commands {
     },
     /// 检测项目是否已配置 agent-tui（无需 agents.yaml 也可运行）
     Doctor {
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
+    /// 打印速查表（只记 3 条命令）
+    Guide {
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
+    /// 当前阶段 + 一条建议命令
+    Next {
         #[arg(long)]
         project_dir: Option<PathBuf>,
     },
@@ -236,6 +283,38 @@ enum Commands {
         #[arg(long)]
         project_dir: Option<PathBuf>,
     },
+    /// 合并多 agent worktree 分支（包装 .agents/merge.sh 或 --all 非交互）
+    Merge {
+        /// 非交互：自动合并所有 agent 分支到 merge-* 分支
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        base: Option<String>,
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
+    /// 查询当前分支 PR 状态（gh pr view）
+    PrStatus {
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
+    /// 合并当前分支 PR（gh pr merge --auto）
+    PrMerge {
+        #[arg(long)]
+        squash: bool,
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
+    /// 清理 verify-loop 残留在项目中的测试任务
+    CleanVerify {
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
+    /// 重置交付批次指纹（新 sprint 前，不清 task_state）
+    ResetBatch {
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -245,18 +324,25 @@ fn main() -> Result<()> {
         return run_command(cmd);
     }
 
-    let project_dir = match config::resolve_project_dir(cli.project_dir.clone()) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("{e:#}");
-            eprintln!(
-                "\n提示: 在新项目根目录运行 `agent-tui init`，或 `agent-tui init --project-dir <路径>`"
-            );
-            std::process::exit(1);
-        }
-    };
+    run_tui(
+        cli.project_dir,
+        cli.max_agents,
+        cli.agent.as_deref(),
+        cli.solo,
+        cli.check,
+    )
+}
 
-    if cli.check {
+fn run_tui(
+    project_dir: Option<PathBuf>,
+    max_agents: Option<usize>,
+    initial_agent: Option<&str>,
+    solo_on_start: bool,
+    check_only: bool,
+) -> Result<()> {
+    let project_dir = project_init::ensure_project_ready(project_dir)?;
+
+    if check_only {
         let agents = config::load_agents(&project_dir)?;
         println!("项目：{}", project_dir.display());
         println!("Agent 数量：{}", agents.len());
@@ -284,9 +370,9 @@ fn main() -> Result<()> {
         &mut terminal,
         &mut guard,
         project_dir.clone(),
-        cli.max_agents,
-        cli.agent.as_deref(),
-        cli.grid,
+        max_agents,
+        initial_agent,
+        solo_on_start,
     );
     terminal::restore_host_terminal();
     guard.disarm();
@@ -304,7 +390,7 @@ fn run(
     project_dir: PathBuf,
     max_agents: Option<usize>,
     initial_agent: Option<&str>,
-    grid_on_start: bool,
+    solo_on_start: bool,
 ) -> Result<()> {
     let mut app = app::App::new(project_dir.clone())?;
     if let Some(max) = max_agents {
@@ -314,9 +400,8 @@ fn run(
     }
     if let Some(name) = initial_agent {
         app.focus_agent_by_name(name);
-    }
-    if grid_on_start {
-        app.show_grid();
+    } else if solo_on_start {
+        app.show_solo();
     }
 
     let _observer_guard = if observer::observer_enabled() {
@@ -388,6 +473,12 @@ fn install_panic_hook() {
 
 fn run_command(cmd: Commands) -> Result<()> {
     match cmd {
+        Commands::Up {
+            project_dir,
+            max_agents,
+            agent,
+            solo,
+        } => return run_tui(project_dir, max_agents, agent.as_deref(), solo, false),
         Commands::Notify {
             agent,
             message,
@@ -429,6 +520,7 @@ fn run_command(cmd: Commands) -> Result<()> {
         Commands::Report {
             message,
             task,
+            status,
             to,
             from,
             project_dir,
@@ -436,14 +528,26 @@ fn run_command(cmd: Commands) -> Result<()> {
             let project_dir = config::resolve_project_dir(project_dir)?;
             let agents = config::load_agents(&project_dir)?;
             let lead = to.unwrap_or_else(|| config::resolve_lead_agent(&agents));
-            delegation::report_task(
-                &project_dir,
-                &from,
-                &lead,
-                task.as_deref(),
-                &message,
-            )?;
-            println!("已回执给 {lead}（from={from}）");
+            if let (Some(t), Some(s)) = (task.as_deref(), status.as_deref()) {
+                delegation::report_task_auto(
+                    &project_dir,
+                    &from,
+                    &lead,
+                    t,
+                    s,
+                    &message,
+                )?;
+                println!("已回执 {s} 给 {lead}（from={from}, task={t}）");
+            } else {
+                delegation::report_task(
+                    &project_dir,
+                    &from,
+                    &lead,
+                    task.as_deref(),
+                    &message,
+                )?;
+                println!("已回执给 {lead}（from={from}）");
+            }
         }
         Commands::PlanDryRun {
             text,
@@ -571,6 +675,11 @@ fn run_command(cmd: Commands) -> Result<()> {
                 project_dir.join(".agents/LEAD.md").display()
             );
         }
+        Commands::Map { project_dir } => {
+            let project_dir = config::resolve_project_dir(project_dir)?;
+            let msg = project_map::generate(&project_dir)?;
+            println!("{msg}");
+        }
         Commands::Init {
             project_dir,
             force,
@@ -599,6 +708,15 @@ fn run_command(cmd: Commands) -> Result<()> {
             if !status.ready_for_tui {
                 std::process::exit(1);
             }
+        }
+        Commands::Guide { project_dir } => {
+            let dir = project_init::detect_project_or_cwd(project_dir).project_dir;
+            print!("{}", guide::cheat_sheet(Some(&dir)));
+        }
+        Commands::Next { project_dir } => {
+            let dir = project_init::detect_project_or_cwd(project_dir).project_dir;
+            let snap = workflow_phase::evaluate(&dir);
+            print!("{}", workflow_phase::format_next_report(&snap));
         }
         Commands::PrCreate {
             title,
@@ -636,6 +754,52 @@ fn run_command(cmd: Commands) -> Result<()> {
             let task_id =
                 batch_review::dispatch_review_for_project(&project_dir, batch.as_deref())?;
             println!("已委派批次代码审查：{task_id}");
+        }
+        Commands::Merge {
+            all,
+            base,
+            project_dir,
+        } => {
+            let project_dir = config::resolve_project_dir(project_dir)?;
+            let outcome = merge::run_merge(&project_dir, all, base.as_deref())?;
+            println!("{}", outcome.message);
+            if let Some(branch) = outcome.merge_branch {
+                println!("合并分支: {branch}");
+            }
+            if !outcome.merged_agents.is_empty() {
+                println!("已合并: {}", outcome.merged_agents.join(", "));
+            }
+        }
+        Commands::PrStatus { project_dir } => {
+            let project_dir = config::resolve_project_dir(project_dir)?;
+            let report = pr_lifecycle::query_pr_status(&project_dir)?;
+            println!("分支: {}", report.branch);
+            println!("状态: {:?}", report.state);
+            println!("{}", report.message);
+            if let Some(url) = report.url {
+                println!("URL: {url}");
+            }
+        }
+        Commands::PrMerge { squash, project_dir } => {
+            let project_dir = config::resolve_project_dir(project_dir)?;
+            let msg = pr_lifecycle::merge_pr(&project_dir, squash)?;
+            println!("{msg}");
+            println!("提示: TUI 将轮询合并状态并自动派 post-github-merge 验证（AGENT_TUI_POLL_PR=1）");
+        }
+        Commands::CleanVerify { project_dir } => {
+            let project_dir = config::resolve_project_dir(project_dir)?;
+            let report = verify_cleanup::cleanup_verify_artifacts(&project_dir)?;
+            println!("{}", verify_cleanup::format_cleanup_report(&report));
+        }
+        Commands::ResetBatch { project_dir } => {
+            let project_dir = config::resolve_project_dir(project_dir)?;
+            let report = batch_reset::reset_batch_fingerprints(&project_dir)?;
+            println!("{}", batch_reset::format_reset_report(&report));
+            if !report.removed_files.is_empty() {
+                for f in &report.removed_files {
+                    println!("  - {f}");
+                }
+            }
         }
     }
     Ok(())

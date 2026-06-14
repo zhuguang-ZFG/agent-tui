@@ -1,5 +1,6 @@
 //! Task board overlay (Ctrl+T) with optional memory FTS search.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -33,6 +34,7 @@ impl TasksKeyOutcome {
     }
 }
 
+#[derive(PartialEq, Eq)]
 enum PanelMode {
     Board,
     SearchResults,
@@ -45,6 +47,7 @@ pub struct TasksPanel {
     scroll: usize,
     search_input: String,
     mode: PanelMode,
+    collapsed_batches: BTreeSet<String>,
 }
 
 impl TasksPanel {
@@ -56,6 +59,7 @@ impl TasksPanel {
             scroll: 0,
             search_input: String::new(),
             mode: PanelMode::Board,
+            collapsed_batches: BTreeSet::new(),
         }
     }
 
@@ -77,10 +81,45 @@ impl TasksPanel {
     }
 
     pub fn refresh_board(&mut self, project_dir: &Path) {
-        self.board_lines = task_board::format_task_board(project_dir)
-            .map(|s| s.lines().map(String::from).collect())
-            .unwrap_or_else(|e| vec![format!("加载失败：{e:#}")]);
+        self.board_lines = task_board::format_task_board_collapsed(
+            project_dir,
+            &self.collapsed_batches,
+        )
+        .map(|s| s.lines().map(String::from).collect())
+        .unwrap_or_else(|e| vec![format!("加载失败：{e:#}")]);
         self.clamp_scroll();
+    }
+
+    fn toggle_batch_at_cursor(&mut self, project_dir: &Path) {
+        let lines = self.display_lines();
+        if lines.is_empty() {
+            return;
+        }
+        let visible = self.scroll;
+        if visible >= lines.len() {
+            return;
+        }
+        let line = &lines[visible];
+        if !(line.starts_with('▶') || line.starts_with('▼')) {
+            return;
+        }
+        let id = line
+            .split("批次")
+            .nth(1)
+            .and_then(|s| s.split('—').next())
+            .map(|s| s.trim().to_string());
+        if let Some(id) = id {
+            if self.collapsed_batches.contains(&id) {
+                self.collapsed_batches.remove(&id);
+            } else {
+                self.collapsed_batches.insert(id);
+            }
+            self.refresh_board(project_dir);
+        }
+    }
+
+    pub fn cursor_info(&self) -> (usize, usize) {
+        (self.scroll, self.display_lines().len())
     }
 
     fn display_lines(&self) -> &[String] {
@@ -185,6 +224,10 @@ impl TasksPanel {
                 self.scroll = self.display_lines().len().saturating_sub(1);
                 TasksKeyOutcome::handled(None)
             }
+            KeyCode::Char(' ') => {
+                self.toggle_batch_at_cursor(project_dir);
+                TasksKeyOutcome::handled(Some("切换批次折叠".into()))
+            }
             KeyCode::Tab => {
                 self.mode = PanelMode::Board;
                 self.result_lines.clear();
@@ -203,7 +246,7 @@ impl TasksPanel {
         f.render_widget(Clear, area);
 
         let title = match self.mode {
-            PanelMode::Board => " 任务看板  Esc关闭 ",
+            PanelMode::Board => " 任务看板  Space折叠批次  Esc关闭 ",
             PanelMode::SearchResults => " 记忆搜索结果  Tab返回看板 ",
         };
         let block = Block::default()
@@ -226,18 +269,30 @@ impl TasksPanel {
 
         let styled: Vec<Line> = lines[start..end]
             .iter()
-            .map(|line| {
-                let style = if line.starts_with("──") {
+            .enumerate()
+            .map(|(offset, line)| {
+                let abs = start + offset;
+                let is_cursor = abs == self.scroll;
+                let mut style = if line.starts_with("──") {
+                    Style::default().fg(Color::Yellow)
+                } else if line.starts_with('▶') || line.starts_with('▼') {
+                    Style::default()
+                        .fg(Color::LightCyan)
+                        .add_modifier(Modifier::BOLD)
+                } else if line.contains("→建议") {
                     Style::default().fg(Color::Yellow)
                 } else if line.contains('⚡') || line.contains("冲突") {
                     Style::default().fg(Color::Red)
                 } else if line.starts_with("  ✓") {
                     Style::default().fg(Color::Green)
-                } else if line.starts_with('[') {
+                } else if line.trim_start().starts_with('[') {
                     Style::default().fg(Color::Magenta)
                 } else {
                     Style::default()
                 };
+                if is_cursor && self.mode == PanelMode::Board {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
                 Line::from(Span::styled(line.clone(), style))
             })
             .collect();

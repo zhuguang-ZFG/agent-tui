@@ -286,6 +286,16 @@ fn chrono_lite_now(_fmt: &str) -> String {
             fn GetLocalTime(lpSystemTime: *mut SystemTimeWin);
         }
         let mut st = MaybeUninit::<SystemTimeWin>::uninit();
+        // SAFETY:
+        // - `SystemTimeWin` is `#[repr(C)]` with 8×u16 fields, layout-compatible
+        //   with the Win32 `SYSTEMTIME` struct (16 bytes, no padding).
+        // - `GetLocalTime` is a documented kernel32 function that *always* writes
+        //   every field (no return value, no failure mode). It is thread-safe per
+        //   Microsoft docs, so no external synchronisation is required.
+        // - After the call the struct is fully initialised, so
+        //   `MaybeUninit::assume_init` is valid.
+        // - Alternative considered: `std::time::SystemTime` is UTC-only and would
+        //   need `chrono` for local offset; this FFI keeps the crate dep-free.
         unsafe {
             GetLocalTime(st.as_mut_ptr());
             let st = st.assume_init();
@@ -295,7 +305,7 @@ fn chrono_lite_now(_fmt: &str) -> String {
                     st.w_year, st.w_month, st.w_day, st.w_hour, st.w_minute, st.w_second
                 );
             }
-            return format!("{:02}:{:02}:{:02}", st.w_hour, st.w_minute, st.w_second);
+            format!("{:02}:{:02}:{:02}", st.w_hour, st.w_minute, st.w_second)
         }
     }
     #[cfg(not(windows))]
@@ -362,16 +372,12 @@ pub fn notify_agent(project_dir: &Path, agent: &str, message: &str) -> Result<()
     notify_agent_from(project_dir, agent, message, "user")
 }
 
-pub fn notify_agent_from(
+fn write_agent_inbox_lines(
     project_dir: &Path,
     agent: &str,
-    message: &str,
+    msg: &str,
     from: &str,
 ) -> Result<()> {
-    let msg = message.trim();
-    if msg.is_empty() {
-        return Ok(());
-    }
     ensure_shared_dirs(project_dir, Some(agent))?;
 
     let user = display_user();
@@ -399,9 +405,36 @@ pub fn notify_agent_from(
         .open(&private_path)
         .with_context(|| format!("open {}", private_path.display()))?;
     private.write_all(private_line.as_bytes())?;
+    Ok(())
+}
 
+pub fn notify_agent_from(
+    project_dir: &Path,
+    agent: &str,
+    message: &str,
+    from: &str,
+) -> Result<()> {
+    let msg = message.trim();
+    if msg.is_empty() {
+        return Ok(());
+    }
+    write_agent_inbox_lines(project_dir, agent, msg, from)?;
     append_coord_event(project_dir, "notify", Some(agent), msg, from, None, None)?;
     Ok(())
+}
+
+/// Write inbox (shared + private) without events.jsonl — avoids Relay PTY duplicate inject.
+pub fn notify_agent_inbox_only(
+    project_dir: &Path,
+    agent: &str,
+    message: &str,
+    from: &str,
+) -> Result<()> {
+    let msg = message.trim();
+    if msg.is_empty() {
+        return Ok(());
+    }
+    write_agent_inbox_lines(project_dir, agent, msg, from)
 }
 
 /// Write inbox lines only — no events.jsonl, no Relay PTY injection.
@@ -554,7 +587,7 @@ pub fn parse_inbox_command<'a>(
     Ok(InboxCommand::Broadcast(trimmed))
 }
 
-fn parse_task_to_lead<'a>(trimmed: &'a str) -> Option<&'a str> {
+fn parse_task_to_lead(trimmed: &str) -> Option<&str> {
     for p in ["!任务", "!task", "!需求"] {
         if let Some(rest) = trimmed.strip_prefix(p) {
             let msg = rest.trim();
@@ -643,7 +676,7 @@ fn parse_report_command<'a>(
     })
 }
 
-fn split_task_and_description<'a>(rest: &'a str) -> Result<(&'a str, &'a str)> {
+fn split_task_and_description(rest: &str) -> Result<(&str, &str)> {
     let rest = rest.trim();
     if rest.is_empty() {
         bail!("缺少任务名");

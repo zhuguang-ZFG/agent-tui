@@ -75,6 +75,44 @@ pub struct RelayCursorState {
     pub events_cursor: usize,
     pub mailbox_line: usize,
     pub plan_inbox_line: usize,
+    /// Initial Lead briefing already delivered (skip on TUI restart for same lead).
+    #[serde(default)]
+    pub initial_briefing_sent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_briefing_lead: Option<String>,
+}
+
+pub fn initial_briefing_already_sent(project_dir: &Path, lead: &str) -> bool {
+    let s = load_relay_cursor(project_dir);
+    s.initial_briefing_sent && s.initial_briefing_lead.as_deref() == Some(lead)
+}
+
+pub fn mark_initial_briefing_sent(project_dir: &Path, lead: &str) {
+    let mut s = load_relay_cursor(project_dir);
+    s.initial_briefing_sent = true;
+    s.initial_briefing_lead = Some(lead.to_string());
+    let _ = save_relay_cursor(project_dir, &s);
+}
+
+/// After `!sync-lead` — allow Lead PTY to receive a fresh briefing on next inject.
+pub fn clear_initial_briefing(project_dir: &Path) {
+    let mut s = load_relay_cursor(project_dir);
+    s.initial_briefing_sent = false;
+    s.initial_briefing_lead = None;
+    let _ = save_relay_cursor(project_dir, &s);
+}
+
+pub fn update_relay_cursor_fields(
+    project_dir: &Path,
+    events_cursor: usize,
+    mailbox_line: usize,
+    plan_inbox_line: usize,
+) {
+    let mut s = load_relay_cursor(project_dir);
+    s.events_cursor = events_cursor;
+    s.mailbox_line = mailbox_line;
+    s.plan_inbox_line = plan_inbox_line;
+    let _ = save_relay_cursor(project_dir, &s);
 }
 
 pub fn load_relay_cursor(project_dir: &Path) -> RelayCursorState {
@@ -107,6 +145,30 @@ mod tests {
         remember_plan_fingerprint(&dir, "codex:auth-api");
         let loaded = load_plan_fingerprints(&dir);
         assert!(loaded.contains("codex:auth-api"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persists_initial_briefing_flag() {
+        let dir = env::temp_dir().join(format!("coord-briefing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".agents/shared")).unwrap();
+        assert!(!initial_briefing_already_sent(&dir, "cursor"));
+        mark_initial_briefing_sent(&dir, "cursor");
+        assert!(initial_briefing_already_sent(&dir, "cursor"));
+        assert!(!initial_briefing_already_sent(&dir, "claude"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clears_initial_briefing_flag() {
+        let dir = env::temp_dir().join(format!("coord-briefing-clear-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".agents/shared")).unwrap();
+        mark_initial_briefing_sent(&dir, "cursor");
+        assert!(initial_briefing_already_sent(&dir, "cursor"));
+        clear_initial_briefing(&dir);
+        assert!(!initial_briefing_already_sent(&dir, "cursor"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

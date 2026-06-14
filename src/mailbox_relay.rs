@@ -82,6 +82,7 @@ fn extract_task(message: &str) -> Option<String> {
     }
 }
 
+#[allow(dead_code)]
 pub fn register_dedupe(state: &mut RelayState, key: String) {
     state.dedupe_keys.insert(key);
 }

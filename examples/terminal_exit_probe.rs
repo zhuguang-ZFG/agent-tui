@@ -26,7 +26,7 @@ mod agent_tui_terminal {
     use std::io::{self, Write};
     use crossterm::cursor::Show;
     use crossterm::terminal::{self, Clear, ClearType};
-    use crossterm::{execute, queue};
+    use crossterm::execute;
 
     pub fn restore_host_terminal() {
         let _ = ratatui::try_restore();

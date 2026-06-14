@@ -61,6 +61,7 @@ alwaysApply: true
 
 Playbook（人类可读）：`{playbook_s}`  
 能力表：`.agents/STRENGTHS.md`  
+项目地图：`.agents/PROJECT_MAP.md`（`AGENT_TUI_PROJECT_MAP`；拆任务前速览；`agent-tui map` 刷新）  
 完整协议：`{coord_s}`
 
 ## 团队名册（委派目标，勿派给自己）
@@ -163,7 +164,7 @@ fn lead_playbook_body(project_dir: &Path, lead: &str, agents: &[AgentSpec]) -> S
 ## 文档
 
 - 能力表：`.agents/STRENGTHS.md`
-
+- 项目地图：`.agents/PROJECT_MAP.md`（`agent-tui map` / `!map`；拆任务前速览目录与栈）
 - Cursor 规则：worktree `.cursor/rules/agent-tui-orchestrator.mdc`（alwaysApply）
 - 完整协议：`{coord}`
 - 流程说明：agent-tui 仓库 `docs/WORKFLOW.md`
@@ -173,6 +174,7 @@ fn lead_playbook_body(project_dir: &Path, lead: &str, agents: &[AgentSpec]) -> S
 - `AGENT_TUI_ORCHESTRATOR=1` — 你是 Lead
 - `AGENT_TUI_LEAD_PLAYBOOK` — 本文件路径
 - `AGENT_TUI_COORD_DOC` — COORDINATION.md 路径
+- `AGENT_TUI_PROJECT_MAP` — PROJECT_MAP.md 路径
 "#
         ,
         lead = lead,
@@ -192,7 +194,8 @@ fn agents_stub_body(project_dir: &Path, lead: &str) -> String {
 
 1. 先读：`.cursor/rules/agent-tui-orchestrator.mdc`（alwaysApply，每次会话生效）
 2. Playbook：`{playbook}`
-3. 完整协议：`{coord}`
+3. 项目地图：`.agents/PROJECT_MAP.md`（目录与栈速览）
+4. 完整协议：`{coord}`
 
 收到工人回执 → **立即** 输出下一波 `agent-plan`，勿等用户确认。
 "#
@@ -234,11 +237,9 @@ pub fn sync_lead_context(project_dir: &Path, lead: &str, worktree: &Path) -> Res
 
     // Hint Cursor to load orchestrator context when AGENTS.md exists.
     let agents_md = worktree.join("AGENTS.md");
-    let pointer = format!(
-        "\n\n<!-- agent-tui:lead -->\n\
+    let pointer = "\n\n<!-- agent-tui:lead -->\n\
          > **agent-tui Lead 模式**：读 `AGENTS-agent-tui.md` 与 `.cursor/rules/agent-tui-orchestrator.mdc`。\n\
-         <!-- /agent-tui:lead -->\n"
-    );
+         <!-- /agent-tui:lead -->\n".to_string();
     if agents_md.is_file() {
         let content = fs::read_to_string(&agents_md).unwrap_or_default();
         if !content.contains("agent-tui:lead") {
@@ -254,6 +255,8 @@ pub fn sync_lead_context(project_dir: &Path, lead: &str, worktree: &Path) -> Res
         )
         .with_context(|| format!("write {}", agents_md.display()))?;
     }
+
+    let _ = crate::project_map::maybe_refresh(project_dir);
 
     Ok(())
 }

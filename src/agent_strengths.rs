@@ -255,6 +255,8 @@ pub fn worker_fit_score(
     }
     if let Some(dir) = project_dir {
         total += delegation_stats::history_bias(dir, worker, task, description);
+        total += crate::routing::project_routing_bonus(dir, worker, task, description);
+        total += crate::specialists::specialist_worker_boost(dir, worker, task, description);
     }
     total
 }
@@ -387,6 +389,37 @@ pub fn format_delegation_guide(agents: &[AgentSpec], lead: &str) -> String {
 
 TUI 会在委派明显错配时向 Lead 提示更优 worker（见日志与 inbox）。
 "#
+    )
+}
+
+pub fn format_routing_cheatsheet(agents: &[AgentSpec], lead: &str) -> String {
+    let executor = agents
+        .iter()
+        .find(|a| a.role == "executor")
+        .map(|a| a.name.as_str())
+        .unwrap_or("codex");
+    let frontend = agents
+        .iter()
+        .find(|a| a.role == "frontend")
+        .map(|a| a.name.as_str())
+        .unwrap_or("kimi");
+    let reviewer = agents
+        .iter()
+        .find(|a| a.role == "reviewer")
+        .map(|a| a.name.as_str())
+        .unwrap_or("mimo");
+    let advisor = agents
+        .iter()
+        .find(|a| a.role == "advisor")
+        .map(|a| a.name.as_str())
+        .unwrap_or("claude");
+    format!(
+        "UI/React/CSS/页面 → {frontend}\n\
+         API/Rust/后端/脚本 → {executor}\n\
+         review/审查/smoke → {reviewer}\n\
+         架构/blocked/ADR → {advisor}\n\
+         编排/续派/merge-ready → {lead}\n\
+         可编辑 .agents/routing.yaml 覆盖关键词路由"
     )
 }
 

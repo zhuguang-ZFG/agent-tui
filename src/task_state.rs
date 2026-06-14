@@ -105,12 +105,6 @@ pub fn on_report(
     status: &str,
     summary: &str,
 ) -> Result<()> {
-    let status = match status {
-        "done" => "done",
-        "failed" => "failed",
-        "blocked" => "blocked",
-        other => other,
-    };
     record_transition(
         project_dir,
         task,
@@ -151,6 +145,7 @@ pub fn load_snapshots(project_dir: &Path) -> HashMap<String, TaskSnapshot> {
     map
 }
 
+#[allow(dead_code)]
 pub fn tasks_by_status<'a>(
     snapshots: &'a HashMap<String, TaskSnapshot>,
     status: &str,
@@ -163,6 +158,7 @@ pub fn tasks_by_status<'a>(
     out
 }
 
+#[allow(dead_code)]
 pub fn format_status_line(s: &TaskSnapshot) -> String {
     let worker = s.worker.as_deref().unwrap_or("-");
     let icon = match s.status.as_str() {

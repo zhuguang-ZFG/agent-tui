@@ -21,11 +21,7 @@ use crate::terminal;
 pub const BRIEFING_DELAY: Duration = Duration::from_secs(6);
 /// Delay before re-injecting rules after lead pane restart (CLI warm-up).
 pub const BRIEFING_RESTART_DELAY: Duration = Duration::from_secs(6);
-const BRIEFING_RETRY_DELAYS: &[Duration] = &[
-    Duration::from_secs(3),
-    Duration::from_secs(8),
-    Duration::from_secs(15),
-];
+const BRIEFING_RETRY_DELAYS: &[Duration] = &[Duration::from_secs(3)];
 const DEFAULT_BRIEFING_INTERVAL_SECS: u64 = 7200;
 const DEFAULT_BRIEFING_EVERY_REPORTS: u32 = 5;
 
@@ -57,11 +53,13 @@ pub struct LeadWatchState {
 }
 
 impl LeadWatchState {
-    pub fn new(project_dir: &Path) -> Self {
+    pub fn new(project_dir: &Path, lead: &str) -> Self {
         let persisted = crate::coord_dedupe::load_relay_cursor(project_dir);
+        let briefing_sent =
+            crate::coord_dedupe::initial_briefing_already_sent(project_dir, lead);
         Self {
             seen_plans: crate::coord_dedupe::load_plan_fingerprints(project_dir),
-            briefing_sent: false,
+            briefing_sent,
             briefing_after: None,
             briefing_retries: Vec::new(),
             last_briefing_at: None,
@@ -70,6 +68,13 @@ impl LeadWatchState {
             plan_inbox_line: persisted.plan_inbox_line,
             followup_plan_seen: HashSet::new(),
         }
+    }
+
+    /// TUI restart with persisted briefing — skip initial arm/inject.
+    pub fn skip_persisted_initial_briefing(&mut self) {
+        self.briefing_sent = true;
+        self.briefing_after = None;
+        self.briefing_retries.clear();
     }
 
     pub fn clear_followup_scan(&mut self) {
@@ -312,9 +317,30 @@ pub fn dispatch_plan_items(
     }
 
     let mut executed = 0usize;
+    let agents = config::load_agents(project_dir).unwrap_or_default();
     for item in ready {
         if item.worker.eq_ignore_ascii_case(lead) {
             continue;
+        }
+        if let Some(better) = agent_strengths::suggest_worker(
+            &agents,
+            lead,
+            &item.task,
+            &item.description,
+            Some(project_dir),
+        ) {
+            if !better.name.eq_ignore_ascii_case(&item.worker) {
+                if let Some(msg) = agent_strengths::delegation_mismatch(
+                    &agents,
+                    lead,
+                    &item.worker,
+                    &item.task,
+                    &item.description,
+                    Some(project_dir),
+                ) {
+                    terminal::log_message(project_dir, "info", &msg);
+                }
+            }
         }
         match delegation::delegate_task(
             project_dir,
@@ -402,10 +428,16 @@ fn coord_doc_path(project_dir: &Path) -> String {
         .to_string()
 }
 
+fn project_map_path(project_dir: &Path) -> String {
+    normalize_windows_path(project_dir.join(crate::project_map::MAP_REL_PATH))
+        .to_string_lossy()
+        .to_string()
+}
+
 /// Single-line PTY inject (no fenced code — avoids shell/CLI parsing issues).
 pub fn briefing_pty_line(lead: &str, coord_doc: &str) -> String {
     format!(
-        "[agent-tui·Lead] 你是主 Agent ({lead})，身份=Orchestrator 非码农。收到【回执·…】→立刻 agent-plan，勿问用户。规则: .cursor/rules/agent-tui-orchestrator.mdc | {coord_doc}"
+        "[agent-tui·Lead] 你是主 Agent ({lead})，身份=Orchestrator 非码农。收到【回执·…】→立刻 agent-plan，勿问用户。规则: .cursor/rules/agent-tui-orchestrator.mdc | {coord_doc} | 结构速览: .agents/PROJECT_MAP.md"
     )
 }
 
@@ -427,21 +459,22 @@ fn inject_refresh_to_pane(pane: &AgentPane, lead: &str, coord_doc: &str, reason:
     pane.wake_prompt();
 }
 
-fn initial_briefing_message(lead: &str, coord_doc: &str, strength_line: &str) -> String {
+fn initial_briefing_message(lead: &str, coord_doc: &str, strength_line: &str, map_doc: &str) -> String {
     format!(
         "【协调规则·Lead 身份】你在 agent-tui 五宫格中任 **唯一 Lead（{lead}）**，`AGENT_TUI_ORCHESTRATOR=1`。\
          定位：统筹者 — 你拆任务、输出 agent-plan；TUI 自动 delegate；工人 agent-report 回传；你**立即续派**，勿等用户。\
          {strength_line}\
-         必读：worktree `.cursor/rules/agent-tui-orchestrator.mdc` + `.agents/LEAD.md` + `.agents/STRENGTHS.md`。\
+         必读：worktree `.cursor/rules/agent-tui-orchestrator.mdc` + `.agents/LEAD.md` + `.agents/STRENGTHS.md` + `.agents/PROJECT_MAP.md`（`AGENT_TUI_PROJECT_MAP`）。\
+         拆任务前扫一眼 PROJECT_MAP 了解目录与栈；不存在则 `agent-tui map` 或留言板 `!map`。\
          闭环：用户任务→agent-plan→自动派发→agent-report→续派 agent-plan。\
-         完整协议：{coord_doc}"
+         完整协议：{coord_doc} | 项目地图：{map_doc}"
     )
 }
 
-fn refresh_briefing_message(lead: &str, coord_doc: &str, reason: &str) -> String {
+fn refresh_briefing_message(lead: &str, coord_doc: &str, reason: &str, map_doc: &str) -> String {
     format!(
         "【Lead 提醒·{reason}】你仍是 **唯一 Lead（{lead}）**。收到工人回执 → 同一轮内输出 agent-plan（review/续派/修复），禁止问用户是否继续。\
-         规则：agent-tui-orchestrator.mdc + LEAD.md。协议：{coord_doc}"
+         规则：agent-tui-orchestrator.mdc + LEAD.md + PROJECT_MAP（{map_doc}）。协议：{coord_doc}"
     )
 }
 
@@ -452,13 +485,14 @@ fn deliver_initial_briefing(
     lead_pane: Option<&AgentPane>,
 ) -> Result<()> {
     let coord_doc = coord_doc_path(project_dir);
+    let map_doc = project_map_path(project_dir);
     let strength_line = config::load_agents(project_dir)
         .map(|agents| agent_strengths::format_briefing_strengths(&agents, lead))
         .unwrap_or_else(|_| "优势委派：按 .agents/STRENGTHS.md 匹配 worker。".into());
-    meta::notify_agent_from(
+    meta::notify_agent_inbox_only(
         project_dir,
         lead,
-        &initial_briefing_message(lead, &coord_doc, &strength_line),
+        &initial_briefing_message(lead, &coord_doc, &strength_line, &map_doc),
         "system",
     )?;
     state.briefing_sent = true;
@@ -479,7 +513,9 @@ fn deliver_initial_briefing(
             "warn",
             &format!("briefing notify written but lead pane not ready ({lead})"),
         );
+        state.rebrief_after = Some(Instant::now() + BRIEFING_RESTART_DELAY);
     }
+    crate::coord_dedupe::mark_initial_briefing_sent(project_dir, lead);
     Ok(())
 }
 
@@ -494,10 +530,11 @@ fn deliver_refresh_briefing(
         return Ok(false);
     }
     let coord_doc = coord_doc_path(project_dir);
-    meta::notify_agent_from(
+    let map_doc = project_map_path(project_dir);
+    meta::notify_agent_inbox_only(
         project_dir,
         lead,
-        &refresh_briefing_message(lead, &coord_doc, reason),
+        &refresh_briefing_message(lead, &coord_doc, reason, &map_doc),
         "system",
     )?;
     state.last_briefing_at = Some(Instant::now());
@@ -593,8 +630,8 @@ fn arm_briefing_retries(state: &mut LeadWatchState) {
 
 /// Fire scheduled PTY re-injects until cursor CLI is ready to accept input.
 pub fn process_briefing_retries(
-    project_dir: &Path,
-    lead: &str,
+    _project_dir: &Path,
+    _lead: &str,
     state: &mut LeadWatchState,
     lead_pane: Option<&AgentPane>,
 ) -> usize {
@@ -608,7 +645,7 @@ pub fn process_briefing_retries(
             return true;
         }
         if let Some(pane) = lead_pane {
-            inject_briefing_to_pane(pane, lead, &coord_doc_path(project_dir));
+            pane.wake_prompt();
             fired += 1;
         }
         false

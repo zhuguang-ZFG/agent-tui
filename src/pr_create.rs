@@ -88,11 +88,13 @@ pub fn create_pr(
          - Subtasks completed and reviewed via agent-tui review gate\n\
          - Lead: merge-ready notification",
     );
-    let base = base.unwrap_or("main");
+    let base = base
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::merge::resolve_base_branch(project_dir));
 
     let mut cmd = Command::new("gh");
     cmd.current_dir(&cwd);
-    cmd.args(["pr", "create", "--title", &title, "--body", body, "--base", base]);
+    cmd.args(["pr", "create", "--title", &title, "--body", body, "--base", &base]);
     if draft {
         cmd.arg("--draft");
     }
