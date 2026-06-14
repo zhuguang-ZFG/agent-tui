@@ -10,6 +10,8 @@ pub const PREFERRED_ORDER: &[&str] = &["claude", "codex", "mimo", "kimi", "curso
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentsFile {
+    #[serde(default)]
+    pub lead: Option<String>,
     pub agents: BTreeMap<String, AgentEntry>,
 }
 
@@ -36,6 +38,12 @@ pub struct AgentSpec {
     pub command: String,
     pub role: String,
     pub worktree: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentRoster {
+    pub lead: Option<String>,
+    pub agents: Vec<AgentSpec>,
 }
 
 pub fn validate_agent_name(name: &str) -> Result<()> {
@@ -103,12 +111,13 @@ pub fn agents_yaml_path(project: &Path) -> Option<PathBuf> {
     None
 }
 
-pub fn load_agents(project: &Path) -> Result<Vec<AgentSpec>> {
+pub fn load_agent_roster(project: &Path) -> Result<AgentRoster> {
     let yaml_path = agents_yaml_path(project)
         .with_context(|| format!("no agents.yaml under {}", project.display()))?;
     let text = fs::read_to_string(&yaml_path)
         .with_context(|| format!("read {}", yaml_path.display()))?;
     let file: AgentsFile = serde_yaml::from_str(&text).context("parse agents.yaml")?;
+    let configured_lead = file.lead.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
 
     let mut enabled: Vec<(String, AgentEntry)> = file
         .agents
@@ -138,7 +147,7 @@ pub fn load_agents(project: &Path) -> Result<Vec<AgentSpec>> {
         }
     });
 
-    Ok(enabled
+    let agents = enabled
         .into_iter()
         .map(|(name, entry)| AgentSpec {
             worktree: worktree_cwd(project, &name),
@@ -146,16 +155,44 @@ pub fn load_agents(project: &Path) -> Result<Vec<AgentSpec>> {
             command: entry.command,
             role: entry.role,
         })
-        .collect())
+        .collect();
+
+    Ok(AgentRoster {
+        lead: configured_lead,
+        agents,
+    })
 }
 
-/// Primary coordinator: `role: architect`, else `AGENT_TUI_LEAD`, else `cursor`, else `claude`, else first.
+pub fn load_agents(project: &Path) -> Result<Vec<AgentSpec>> {
+    Ok(load_agent_roster(project)?.agents)
+}
+
+pub fn load_agents_and_lead(project: &Path) -> Result<(Vec<AgentSpec>, String)> {
+    let roster = load_agent_roster(project)?;
+    let lead = resolve_lead_agent_from_roster(&roster);
+    Ok((roster.agents, lead))
+}
+
+/// Primary coordinator: `AGENT_TUI_LEAD`, else explicit `lead:`, else `role: architect`, else `cursor`, else `claude`, else first.
+pub fn resolve_lead_agent_from_roster(roster: &AgentRoster) -> String {
+    resolve_lead_agent_with_config(&roster.agents, roster.lead.as_deref())
+}
+
 pub fn resolve_lead_agent(agents: &[AgentSpec]) -> String {
+    resolve_lead_agent_with_config(agents, None)
+}
+
+pub fn resolve_lead_agent_with_config(agents: &[AgentSpec], configured_lead: Option<&str>) -> String {
     if let Ok(name) = std::env::var("AGENT_TUI_LEAD") {
         let name = name.trim();
         if !name.is_empty()
             && agents.iter().any(|a| a.name.eq_ignore_ascii_case(name))
         {
+            return name.to_string();
+        }
+    }
+    if let Some(name) = configured_lead.map(str::trim).filter(|name| !name.is_empty()) {
+        if agents.iter().any(|a| a.name.eq_ignore_ascii_case(name)) {
             return name.to_string();
         }
     }
