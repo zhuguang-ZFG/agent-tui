@@ -165,6 +165,8 @@ impl App {
             &mut self.panes,
             &self.coord_events,
         );
+        self.relay
+            .persist_with_plan_inbox(self.lead_watch.plan_inbox_line());
         self.dirty = true;
     }
 
@@ -415,6 +417,7 @@ impl App {
             if mb_delivered > 0 {
                 self.dirty = true;
             }
+            self.relay.persist_with_plan_inbox(self.lead_watch.plan_inbox_line());
 
             let retried = dead_letter::process_retry_queue(&self.project_dir, &self.lead_agent);
             if retried > 0 {

@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 
 use crate::agent_memory;
+use crate::coord_dedupe::{self, RelayCursorState};
 use crate::config::{load_agents, resolve_lead_agent};
 use crate::dead_letter;
 use crate::delegation;
@@ -17,7 +18,7 @@ use crate::mailbox;
 use crate::meta;
 use crate::observer;
 use crate::report_watch;
-use crate::relay;
+use crate::relay::{self, RelayState};
 use crate::task_dag;
 use crate::task_state;
 
@@ -761,6 +762,107 @@ pub fn verify_lead_identity_sync(project_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// relay_cursor.json survives restart (events + mailbox + plan_inbox offsets).
+pub fn verify_relay_cursor_persist(project_dir: &Path) -> Result<()> {
+    let before = coord_dedupe::load_relay_cursor(project_dir);
+    let probe = RelayCursorState {
+        events_cursor: before.events_cursor.saturating_add(1000),
+        mailbox_line: before.mailbox_line.saturating_add(1000),
+        plan_inbox_line: before.plan_inbox_line.saturating_add(1000),
+    };
+    coord_dedupe::save_relay_cursor(project_dir, &probe)?;
+    let loaded = coord_dedupe::load_relay_cursor(project_dir);
+    if loaded.events_cursor != probe.events_cursor
+        || loaded.mailbox_line != probe.mailbox_line
+        || loaded.plan_inbox_line != probe.plan_inbox_line
+    {
+        bail!("relay cursor reload mismatch: {loaded:?} vs {probe:?}");
+    }
+    let relay = RelayState::new(project_dir, 2);
+    if relay.cursor != probe.events_cursor || relay.mailbox_line != probe.mailbox_line {
+        bail!(
+            "RelayState expected cursor={} mailbox={}, got {} {}",
+            probe.events_cursor,
+            probe.mailbox_line,
+            relay.cursor,
+            relay.mailbox_line
+        );
+    }
+    let lw = lead_watch::LeadWatchState::new(project_dir);
+    if lw.plan_inbox_line() != probe.plan_inbox_line {
+        bail!(
+            "LeadWatchState plan_inbox_line expected {}",
+            probe.plan_inbox_line
+        );
+    }
+    coord_dedupe::save_relay_cursor(project_dir, &before)?;
+    Ok(())
+}
+
+/// blocked + max nudges → auto-delegate to advisor without human.
+pub fn verify_blocked_escalation(project_dir: &Path) -> Result<()> {
+    let agents = load_agents(project_dir)?;
+    let lead = resolve_lead_agent(&agents);
+    let advisor = agents
+        .iter()
+        .find(|a| a.role == "advisor" && !a.name.eq_ignore_ascii_case(&lead))
+        .map(|a| a.name.clone())
+        .ok_or_else(|| anyhow::anyhow!("verify blocked: need advisor in agents.yaml"))?;
+
+    let task = unique_task("blocked-esc");
+    delegation::delegate_task(project_dir, &lead, "codex", &task, "blocked 升级验证")?;
+    delegation::report_task_auto(
+        project_dir,
+        "codex",
+        &lead,
+        &task,
+        "blocked",
+        "缺少外部 API 凭证",
+    )?;
+
+    let path = project_dir.join(".agents/shared/lead_followup.jsonl");
+    let content = std::fs::read_to_string(&path)?;
+    let max = std::env::var("AGENT_TUI_LEAD_FOLLOWUP_MAX_NUDGES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
+    let mut lines: Vec<String> = Vec::new();
+    let mut found = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(mut rec) = serde_json::from_str::<lead_followup::FollowupRecord>(trimmed) else {
+            lines.push(line.to_string());
+            continue;
+        };
+        if rec.task == task {
+            rec.nudge_count = max;
+            rec.escalated = false;
+            found = true;
+        }
+        lines.push(serde_json::to_string(&rec)?);
+    }
+    if !found {
+        bail!("blocked escalation: missing followup record for {task}");
+    }
+    std::fs::write(&path, format!("{}\n", lines.join("\n")))?;
+
+    let n = lead_followup::try_blocked_escalations(project_dir, &lead);
+    if n != 1 {
+        bail!("blocked escalation: expected 1 delegate, got {n}");
+    }
+    let unblock = format!("{task}-unblock");
+    let entries = mailbox::load_entries(project_dir, 50);
+    if !entries.iter().any(|e| {
+        e.kind == "delegate" && e.to == advisor && e.task.as_deref() == Some(unblock.as_str())
+    }) {
+        bail!("blocked escalation: missing advisor delegate for {unblock}");
+    }
+    Ok(())
+}
+
 pub fn run_all(project_dir: &Path) -> Result<()> {
     verify_parsers().context("parser checks")?;
     verify_relay_cursor_hold().context("relay cursor hold")?;
@@ -772,6 +874,8 @@ pub fn run_all(project_dir: &Path) -> Result<()> {
     verify_lead_transcript_followup_chain(project_dir).context("lead transcript followup")?;
     verify_dag_cycle_rejected(project_dir).context("DAG cycle rejection")?;
     verify_lead_identity_sync(project_dir).context("lead identity sync")?;
+    verify_relay_cursor_persist(project_dir).context("relay cursor persist")?;
+    verify_blocked_escalation(project_dir).context("blocked advisor escalate")?;
     observer::verify_http_snapshot(project_dir).context("observer HTTP")?;
     observer::verify_sse_stream(project_dir).context("observer SSE")?;
     let snap = observer::build_snapshot(project_dir).context("observer snapshot")?;
@@ -804,6 +908,8 @@ pub fn run_all(project_dir: &Path) -> Result<()> {
     println!("  lead transcript: tail 扫描 agent-plan → 自动派发 ✓");
     println!("  DAG cycle: 环依赖拒绝委派 ✓");
     println!("  lead identity: sync-lead + orchestrator.mdc + LEAD.md ✓");
+    println!("  relay persist: relay_cursor.json 重启恢复 ✓");
+    println!("  blocked: max nudges → advisor 自动升级 ✓");
     println!("  relay: PTY 未就绪时不推进游标 ✓");
     println!("  dedupe: plan 指纹重启后仍有效 ✓");
     println!("  observer: /api/snapshot + SSE stream ✓");

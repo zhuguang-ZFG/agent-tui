@@ -7,12 +7,20 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::config;
+use crate::delegation;
 use crate::lead_watch::{self, LeadWatchState};
 use crate::meta::inbox_timestamp_iso;
 use crate::pane::AgentPane;
 use crate::terminal;
 
-const FOLLOWUP_TAIL_CHARS: usize = 12_000;
+fn followup_tail_chars() -> usize {
+    std::env::var("AGENT_TUI_LEAD_FOLLOWUP_TAIL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(12_000)
+        .clamp(2_000, 256_000)
+}
 
 fn followup_path(project_dir: &Path) -> PathBuf {
     project_dir.join(".agents/shared/lead_followup.jsonl")
@@ -29,6 +37,9 @@ pub struct FollowupRecord {
     /// Earliest unix time (due+ prefix) when a PTY nudge may fire.
     #[serde(default)]
     pub due_nudge: String,
+    /// blocked 已自动升级 advisor（避免重复委派）
+    #[serde(default)]
+    pub escalated: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -36,6 +47,7 @@ pub struct FollowupOutcome {
     pub dispatched: usize,
     pub satisfied: usize,
     pub nudged: usize,
+    pub escalated: usize,
 }
 
 pub fn followup_enabled() -> bool {
@@ -52,6 +64,28 @@ fn followup_timeout_secs() -> u64 {
         .max(15)
 }
 
+fn followup_timeout_for_status(status: &str) -> u64 {
+    match status {
+        "blocked" => std::env::var("AGENT_TUI_BLOCKED_FOLLOWUP_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(45)
+            .max(15),
+        "failed" => std::env::var("AGENT_TUI_FAILED_FOLLOWUP_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60)
+            .max(15),
+        _ => followup_timeout_secs(),
+    }
+}
+
+pub fn blocked_escalate_enabled() -> bool {
+    std::env::var("AGENT_TUI_BLOCKED_ESCALATE")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
 fn max_nudges() -> u32 {
     std::env::var("AGENT_TUI_LEAD_FOLLOWUP_MAX_NUDGES")
         .ok()
@@ -61,11 +95,11 @@ fn max_nudges() -> u32 {
 }
 
 fn transcript_tail(text: &str) -> &str {
-    if text.len() <= FOLLOWUP_TAIL_CHARS {
+    let tail_chars = followup_tail_chars();
+    if text.len() <= tail_chars {
         return text;
     }
-    // Safe-ish cut: skip to next char boundary from end.
-    let start = text.len() - FOLLOWUP_TAIL_CHARS;
+    let start = text.len() - tail_chars;
     &text[start..]
 }
 
@@ -120,7 +154,8 @@ pub fn on_worker_report(
         status: status.to_string(),
         satisfied: false,
         nudge_count: 0,
-        due_nudge: due_timestamp(followup_timeout_secs()),
+        due_nudge: due_timestamp(followup_timeout_for_status(status)),
+        escalated: false,
     };
     let line = serde_json::to_string(&rec)?;
     let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
@@ -284,7 +319,80 @@ pub fn process_pending(
     }
 
     out.nudged = nudge_pending(project_dir, lead, lead_pane);
+    out.escalated = try_blocked_escalations(project_dir, lead);
     out
+}
+
+fn find_advisor(project_dir: &Path, lead: &str) -> Option<String> {
+    config::load_agents(project_dir)
+        .ok()?
+        .into_iter()
+        .find(|a| a.role == "advisor" && !a.name.eq_ignore_ascii_case(lead))
+        .map(|a| a.name)
+        .or_else(|| {
+            config::load_agents(project_dir)
+                .ok()?
+                .into_iter()
+                .find(|a| !a.name.eq_ignore_ascii_case(lead))
+                .map(|a| a.name)
+        })
+}
+
+/// After max nudges on blocked, auto-delegate unblock task to advisor (no human gate).
+pub fn try_blocked_escalations(project_dir: &Path, lead: &str) -> usize {
+    if !followup_enabled() || !blocked_escalate_enabled() {
+        return 0;
+    }
+    let Some(advisor) = find_advisor(project_dir, lead) else {
+        return 0;
+    };
+    let path = followup_path(project_dir);
+    let Ok(content) = fs::read_to_string(&path) else {
+        return 0;
+    };
+    let max = max_nudges();
+    let mut lines: Vec<String> = Vec::new();
+    let mut escalated = 0usize;
+    let mut dirty = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(mut rec) = serde_json::from_str::<FollowupRecord>(trimmed) else {
+            lines.push(line.to_string());
+            continue;
+        };
+        if rec.satisfied || rec.status != "blocked" || rec.escalated {
+            lines.push(serde_json::to_string(&rec).unwrap_or_else(|_| line.to_string()));
+            continue;
+        }
+        if rec.nudge_count >= max {
+            let unblock_task = format!("{}-unblock", rec.task);
+            let desc = format!(
+                "协助解除 blocked：工人 {} 任务「{}」受阻，请分析并 agent-report；Lead 无需等用户确认",
+                rec.worker, rec.task
+            );
+            if delegation::delegate_task(project_dir, lead, &advisor, &unblock_task, &desc).is_ok() {
+                rec.escalated = true;
+                escalated += 1;
+                dirty = true;
+                terminal::log_message(
+                    project_dir,
+                    "info",
+                    &format!(
+                        "blocked 自动升级 → {advisor}/{unblock_task}（原 {}/{}）",
+                        rec.worker, rec.task
+                    ),
+                );
+            }
+        }
+        lines.push(serde_json::to_string(&rec).unwrap_or_else(|_| line.to_string()));
+    }
+    if dirty {
+        let _ = fs::write(&path, format!("{}\n", lines.join("\n")));
+    }
+    escalated
 }
 
 fn nudge_pending(project_dir: &Path, lead: &str, lead_pane: Option<&AgentPane>) -> usize {
@@ -312,7 +420,7 @@ fn nudge_pending(project_dir: &Path, lead: &str, lead_pane: Option<&AgentPane>) 
             if let Some(pane) = lead_pane {
                 pane.inject_line(&build_nudge_line(&rec, lead));
                 rec.nudge_count += 1;
-                rec.due_nudge = due_timestamp(followup_timeout_secs());
+                rec.due_nudge = due_timestamp(followup_timeout_for_status(&rec.status));
                 nudged += 1;
                 dirty = true;
                 terminal::log_message(

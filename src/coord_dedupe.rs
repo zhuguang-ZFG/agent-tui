@@ -68,6 +68,32 @@ pub fn remember_relay_dedupe(project_dir: &Path, key: &str) {
     let _ = append_key(project_dir, RELAY, key);
 }
 
+const RELAY_CURSOR: &str = "shared/relay_cursor.json";
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct RelayCursorState {
+    pub events_cursor: usize,
+    pub mailbox_line: usize,
+    pub plan_inbox_line: usize,
+}
+
+pub fn load_relay_cursor(project_dir: &Path) -> RelayCursorState {
+    let path = path(project_dir, RELAY_CURSOR);
+    let Ok(content) = fs::read_to_string(path) else {
+        return RelayCursorState::default();
+    };
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+pub fn save_relay_cursor(project_dir: &Path, state: &RelayCursorState) -> std::io::Result<()> {
+    let path = path(project_dir, RELAY_CURSOR);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::to_string_pretty(state).unwrap_or_else(|_| "{}".into());
+    fs::write(path, body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

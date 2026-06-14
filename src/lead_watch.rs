@@ -56,6 +56,7 @@ pub struct LeadWatchState {
 
 impl LeadWatchState {
     pub fn new(project_dir: &Path) -> Self {
+        let persisted = crate::coord_dedupe::load_relay_cursor(project_dir);
         Self {
             seen_plans: crate::coord_dedupe::load_plan_fingerprints(project_dir),
             briefing_sent: false,
@@ -64,7 +65,7 @@ impl LeadWatchState {
             last_briefing_at: None,
             reports_since_briefing: 0,
             rebrief_after: None,
-            plan_inbox_line: 0,
+            plan_inbox_line: persisted.plan_inbox_line,
             followup_plan_seen: HashSet::new(),
         }
     }
@@ -75,6 +76,10 @@ impl LeadWatchState {
 
     pub fn followup_plan_seen_mut(&mut self) -> &mut HashSet<String> {
         &mut self.followup_plan_seen
+    }
+
+    pub fn plan_inbox_line(&self) -> usize {
+        self.plan_inbox_line
     }
 
     pub fn seen_plans_mut(&mut self) -> &mut HashSet<String> {
@@ -127,6 +132,12 @@ fn briefing_every_reports() -> Option<u32> {
 
 fn auto_dispatch_enabled() -> bool {
     std::env::var("AGENT_TUI_AUTO_DISPATCH")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
+pub fn plan_inbox_enabled() -> bool {
+    std::env::var("AGENT_TUI_PLAN_INBOX")
         .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
         .unwrap_or(true)
 }
@@ -371,7 +382,7 @@ pub fn watch_plan_inbox(
     agent_names: &[String],
     state: &mut LeadWatchState,
 ) -> usize {
-    if !auto_dispatch_enabled() {
+    if !auto_dispatch_enabled() || !plan_inbox_enabled() {
         return 0;
     }
     let items = crate::plan_inbox::drain_new_items(

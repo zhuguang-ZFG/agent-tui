@@ -37,13 +37,25 @@ pub struct RelayState {
 
 impl RelayState {
     pub fn new(project_dir: &std::path::Path, agent_count: usize) -> Self {
+        let persisted = crate::coord_dedupe::load_relay_cursor(project_dir);
         Self {
-            cursor: 0,
-            mailbox_line: 0,
+            cursor: persisted.events_cursor,
+            mailbox_line: persisted.mailbox_line,
             dedupe_keys: crate::coord_dedupe::load_relay_dedupe(project_dir),
             project_dir: Some(project_dir.to_path_buf()),
             last_sent: vec![None; agent_count],
             wake_after: Vec::new(),
+        }
+    }
+
+    pub fn persist_with_plan_inbox(&self, plan_inbox_line: usize) {
+        if let Some(dir) = self.project_dir.as_ref() {
+            let state = crate::coord_dedupe::RelayCursorState {
+                events_cursor: self.cursor,
+                mailbox_line: self.mailbox_line,
+                plan_inbox_line,
+            };
+            let _ = crate::coord_dedupe::save_relay_cursor(dir, &state);
         }
     }
 

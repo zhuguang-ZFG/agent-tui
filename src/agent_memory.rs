@@ -83,7 +83,9 @@ fn memory_template(agent: &str, role: &str, lead: &str, project_dir: &Path) -> S
         )
     } else {
         String::from(
-            "- 你是 **工人**：收到 `【委派·task】` 立即开工，完成后输出 `agent-report`\n",
+            "- 你是 **工人**：收到 `【委派·task】` 立即开工，完成后输出 `agent-report`\n\
+             - **禁止**询问用户或 Lead「是否允许继续」— 下一任务由 Relay 自动注入\n\
+             - blocked 时 agent-report status=blocked 并说明原因，TUI 会催促 Lead 决策\n",
         )
     };
     format!(
