@@ -1,4 +1,5 @@
 mod agent_memory;
+mod agent_strengths;
 mod app;
 mod claims;
 mod coord_dedupe;
@@ -19,6 +20,7 @@ mod memory_fts;
 mod merge_ready;
 mod meta;
 mod plan_inbox;
+mod pr_create;
 mod project_init;
 mod observer;
 mod pane;
@@ -200,6 +202,19 @@ enum Commands {
     },
     /// 检测项目是否已配置 agent-tui（无需 agents.yaml 也可运行）
     Doctor {
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
+    /// merge-ready 后创建 GitHub PR（包装 gh pr create）
+    PrCreate {
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long, default_value = "main")]
+        base: String,
+        #[arg(long)]
+        draft: bool,
         #[arg(long)]
         project_dir: Option<PathBuf>,
     },
@@ -564,6 +579,29 @@ fn run_command(cmd: Commands) -> Result<()> {
             let status = project_init::detect_project_or_cwd(project_dir);
             print!("{}", project_init::format_doctor_report(&status));
             if !status.ready_for_tui {
+                std::process::exit(1);
+            }
+        }
+        Commands::PrCreate {
+            title,
+            body,
+            base,
+            draft,
+            project_dir,
+        } => {
+            let project_dir = config::resolve_project_dir(project_dir)?;
+            let outcome = pr_create::create_pr(
+                &project_dir,
+                title.as_deref(),
+                body.as_deref(),
+                Some(base.as_str()),
+                draft,
+            )?;
+            println!("{}", outcome.message);
+            if let Some(url) = outcome.url {
+                println!("{url}");
+            }
+            if !outcome.created {
                 std::process::exit(1);
             }
         }

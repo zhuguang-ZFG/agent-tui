@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::agent_strengths;
 use crate::claims;
 use crate::config;
 use crate::delegation;
@@ -200,7 +201,22 @@ pub fn record_and_maybe_retry(
     );
 
     if status == "failed" && auto_retry_enabled() && attempt <= max_retries() {
-        let target = pick_retry_worker(project_dir, lead, worker, attempt);
+        let agents = config::load_agents(project_dir).unwrap_or_default();
+        let target = {
+            let strength = agent_strengths::pick_strength_retry_worker(
+                &agents,
+                lead,
+                worker,
+                attempt,
+                description,
+                task,
+            );
+            if strength.eq_ignore_ascii_case(worker) {
+                pick_retry_worker(project_dir, lead, worker, attempt)
+            } else {
+                strength
+            }
+        };
         let cooldown = compute_cooldown_secs(attempt);
         schedule_retry(
             project_dir,

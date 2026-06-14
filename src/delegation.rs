@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 
+use crate::agent_strengths;
 use crate::claims;
 use crate::config;
 use crate::meta::{self, validate_task_name};
@@ -23,6 +24,14 @@ pub fn delegate_task(
     }
     let task = task.trim();
     validate_task_name(task)?;
+    if let Ok(agents) = config::load_agents(project_dir) {
+        if let Some(hint) =
+            agent_strengths::delegation_mismatch(&agents, lead, worker, task, description)
+        {
+            terminal::log_message(project_dir, "info", &hint);
+            let _ = meta::notify_agent_from(project_dir, lead, &hint, "agent-tui");
+        }
+    }
     claims::claim_task(project_dir, worker, task)?;
 
     let body = if description.trim().is_empty() {

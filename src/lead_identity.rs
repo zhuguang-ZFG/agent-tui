@@ -1,12 +1,12 @@
 //! Lead (orchestrator) identity: rules, playbook, and Cursor worktree sync.
 
-use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
 use crate::config::{load_agents, normalize_windows_path, AgentSpec};
+use crate::agent_strengths;
 
 fn agents_dir(project_dir: &Path) -> PathBuf {
     project_dir.join(".agents")
@@ -21,25 +21,7 @@ fn lead_playbook_path(project_dir: &Path) -> PathBuf {
 }
 
 fn worker_roster_lines(agents: &[AgentSpec], lead: &str) -> String {
-    let mut out = String::from("| Agent | 角色 | 何时委派 |\n|-------|------|----------|\n");
-    for a in agents {
-        if a.name.eq_ignore_ascii_case(lead) {
-            continue;
-        }
-        let when = match a.role.as_str() {
-            "executor" => "后端/API/重构/脚本",
-            "frontend" => "UI/组件/样式/前端逻辑",
-            "reviewer" => "代码审查、测试、质量门禁",
-            "advisor" => "架构咨询、方案对比（不阻塞主路径）",
-            _ => "按任务类型",
-        };
-        let _ = writeln!(
-            out,
-            "| {} | {} | {} |",
-            a.name, a.role, when
-        );
-    }
-    out
+    agent_strengths::format_roster_table(agents, lead)
 }
 
 fn orchestrator_rules_body(project_dir: &Path, lead: &str, agents: &[AgentSpec]) -> String {
@@ -48,6 +30,7 @@ fn orchestrator_rules_body(project_dir: &Path, lead: &str, agents: &[AgentSpec])
     let playbook = normalize_windows_path(lead_playbook_path(project_dir));
     let playbook_s = playbook.to_string_lossy();
     let roster = worker_roster_lines(agents, lead);
+    let delegation_guide = agent_strengths::format_delegation_guide(agents, lead);
 
     format!(
         r#"---
@@ -62,23 +45,28 @@ alwaysApply: true
 - 身份：`{lead}`，`AGENT_TUI_ORCHESTRATOR=1`，`AGENT_TUI_ROLE=architect`
 - 工人在其他 PTY 格子独立 worktree；**你负责想、拆、派、验、续**
 - **输出 `agent-plan` = 下达命令** — TUI 自动 delegate + Relay 注入工人，无需手动切换面板
+- **按专长委派** — 见下方「优势委派」；错配时 TUI 会提示更优 worker
 
 ## 系统分工
 
 | TUI / 协调层自动完成 | 只有 Lead（你）必须做 |
 |----------------------|------------------------|
 | 解析 terminal 里的 agent-plan → delegate | 理解用户需求，拆成可并行 task |
-| 解析工人 agent-report → 通知你 | 决定派给谁、验收标准、依赖顺序 |
+| 解析工人 agent-report → 通知你 | **按 Agent 最强项** 决定派给谁、验收标准、依赖顺序 |
 | Relay 注入 `[协调/…]` 到各 PTY | 收到回执后 **立即** 输出下一波 agent-plan |
 | DAG `depends_on` 延迟派发 | blocked/failed 时调整计划或改派 |
-| failed 任务自动重试（有限次） | review 产出、合并前让 mimo 审查 |
+| failed 任务自动重试（有限次，按专长轮换） | review 产出、合并前让 reviewer 审查 |
+| 委派错配提示 `【委派建议】` | 收到建议后改派或说明为何坚持当前 worker |
 
 Playbook（人类可读）：`{playbook_s}`  
+能力表：`.agents/STRENGTHS.md`  
 完整协议：`{coord_s}`
 
 ## 团队名册（委派目标，勿派给自己）
 
 {roster}
+
+{delegation_guide}
 
 ## 触发 → 行动（零等待用户）
 
@@ -87,7 +75,7 @@ Playbook（人类可读）：`{playbook_s}`
 | `【用户任务】` / 用户描述需求 | 分析 → 输出 **agent-plan** |
 | `【回执·task·done】` / done 回执 | review → 续派（审查/下一波/合并准备） |
 | `【回执·task·awaiting_review】` | TUI 已自动派 `{{task}}-review`；等 mimo done |
-| `【merge-ready】` | 全部子任务 review 通过 → agents-complete merge / `gh pr create` |
+| `【merge-ready】` | 全部子任务 review 通过 → `agent-tui pr-create` 或 agents-complete merge |
 | `【回执·task·failed】` | 输出修复或改派 plan |
 | `【回执·task·blocked】` | 决策：补信息 / 拆 task / 改 scope |
 | `[agent-tui·续派]` 催促 | 立即输出 agent-plan |
@@ -139,6 +127,7 @@ Playbook（人类可读）：`{playbook_s}`
 fn lead_playbook_body(project_dir: &Path, lead: &str, agents: &[AgentSpec]) -> String {
     let coord = normalize_windows_path(coord_path(project_dir));
     let roster = worker_roster_lines(agents, lead);
+    let delegation_guide = agent_strengths::format_delegation_guide(agents, lead);
     format!(
         r#"# Lead Playbook — {lead}
 
@@ -159,15 +148,20 @@ fn lead_playbook_body(project_dir: &Path, lead: &str, agents: &[AgentSpec]) -> S
 
 {roster}
 
+{delegation_guide}
+
 ## Lead 必做清单
 
-1. 收到任务 → 5 分钟内输出首波 agent-plan（可并行多 worker）
+1. 收到任务 → 5 分钟内输出首波 agent-plan（**按专长并行**，见 STRENGTHS.md）
 2. 收到 **done** 回执 → 同一轮对话内续派（review 或下一波）
 3. 收到 **failed/blocked** → 输出修复/决策 plan，勿甩给用户
-4. 合并前 → 委派 mimo review（TUI **硬门禁**：`{{task}}-review` done 后父任务才计 done）
-5. 收到 `【merge-ready】` → 执行 merge / 开 PR，勿问用户
+4. 合并前 → 委派 reviewer review（TUI **硬门禁**：`{{task}}-review` done 后父任务才计 done）
+5. 收到 `【merge-ready】` → `agent-tui pr-create` 或 merge，勿问用户
+6. 收到 `【委派建议】` → 评估是否改派到更擅长的 worker
 
 ## 文档
+
+- 能力表：`.agents/STRENGTHS.md`
 
 - Cursor 规则：worktree `.cursor/rules/agent-tui-orchestrator.mdc`（alwaysApply）
 - 完整协议：`{coord}`
@@ -182,6 +176,7 @@ fn lead_playbook_body(project_dir: &Path, lead: &str, agents: &[AgentSpec]) -> S
         ,
         lead = lead,
         roster = roster,
+        delegation_guide = delegation_guide,
         coord = coord.to_string_lossy(),
     )
 }
@@ -207,7 +202,11 @@ fn agents_stub_body(project_dir: &Path, lead: &str) -> String {
     )
 }
 
-/// Write `.agents/LEAD.md`, orchestrator `.mdc`, and `AGENTS-agent-tui.md` into lead worktree.
+fn strengths_path(project_dir: &Path) -> PathBuf {
+    agents_dir(project_dir).join("STRENGTHS.md")
+}
+
+/// Write `.agents/LEAD.md`, `.agents/STRENGTHS.md`, orchestrator `.mdc`, and `AGENTS-agent-tui.md`.
 pub fn sync_lead_context(project_dir: &Path, lead: &str, worktree: &Path) -> Result<()> {
     let agents = load_agents(project_dir)?;
     fs::create_dir_all(agents_dir(project_dir))
@@ -216,6 +215,10 @@ pub fn sync_lead_context(project_dir: &Path, lead: &str, worktree: &Path) -> Res
     let playbook = lead_playbook_body(project_dir, lead, &agents);
     fs::write(lead_playbook_path(project_dir), &playbook)
         .with_context(|| format!("write {}", lead_playbook_path(project_dir).display()))?;
+
+    let strengths = agent_strengths::strengths_doc_body(&agents, lead);
+    fs::write(strengths_path(project_dir), &strengths)
+        .with_context(|| format!("write {}", strengths_path(project_dir).display()))?;
 
     let rules_dir = worktree.join(".cursor/rules");
     fs::create_dir_all(&rules_dir).with_context(|| format!("mkdir {}", rules_dir.display()))?;

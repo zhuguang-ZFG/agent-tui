@@ -134,7 +134,7 @@ pub fn notify_lead_if_ready(project_dir: &Path, lead: &str) -> Result<bool> {
     let task_list = status.done_tasks.join(", ");
     let body = format!(
         "【merge-ready】全部子任务已 review 通过：{task_list}。\n\
-         ▶ Lead 行动：确认 diff → 运行 agents-complete merge / `gh pr create` → 输出 agent-plan 派发合并后验证（mimo smoke）。\n\
+         ▶ Lead 行动：确认 diff → `agent-tui pr-create` 或 agents-complete merge → 输出 agent-plan 派发合并后验证（reviewer smoke）。\n\
          勿问用户是否合并 — 默认进入合并准备。"
     );
     meta::notify_agent_from(project_dir, lead, &body, "agent-tui")?;

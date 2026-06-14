@@ -6,7 +6,9 @@ use anyhow::Result;
 use regex::Regex;
 use serde::Deserialize;
 
+use crate::agent_strengths;
 use crate::agent_memory;
+use crate::config;
 use crate::config::normalize_windows_path;
 use crate::delegation;
 use crate::mailbox;
@@ -425,12 +427,12 @@ fn inject_refresh_to_pane(pane: &AgentPane, lead: &str, coord_doc: &str, reason:
     pane.wake_prompt();
 }
 
-fn initial_briefing_message(lead: &str, coord_doc: &str) -> String {
+fn initial_briefing_message(lead: &str, coord_doc: &str, strength_line: &str) -> String {
     format!(
         "【协调规则·Lead 身份】你在 agent-tui 五宫格中任 **唯一 Lead（{lead}）**，`AGENT_TUI_ORCHESTRATOR=1`。\
          定位：统筹者 — 你拆任务、输出 agent-plan；TUI 自动 delegate；工人 agent-report 回传；你**立即续派**，勿等用户。\
-         工人：codex=后端 kimi=前端 mimo=审查 claude=顾问；勿委派给自己。\
-         必读：worktree `.cursor/rules/agent-tui-orchestrator.mdc` + `.agents/LEAD.md`。\
+         {strength_line}\
+         必读：worktree `.cursor/rules/agent-tui-orchestrator.mdc` + `.agents/LEAD.md` + `.agents/STRENGTHS.md`。\
          闭环：用户任务→agent-plan→自动派发→agent-report→续派 agent-plan。\
          完整协议：{coord_doc}"
     )
@@ -450,10 +452,13 @@ fn deliver_initial_briefing(
     lead_pane: Option<&AgentPane>,
 ) -> Result<()> {
     let coord_doc = coord_doc_path(project_dir);
+    let strength_line = config::load_agents(project_dir)
+        .map(|agents| agent_strengths::format_briefing_strengths(&agents, lead))
+        .unwrap_or_else(|_| "优势委派：按 .agents/STRENGTHS.md 匹配 worker。".into());
     meta::notify_agent_from(
         project_dir,
         lead,
-        &initial_briefing_message(lead, &coord_doc),
+        &initial_briefing_message(lead, &coord_doc, &strength_line),
         "system",
     )?;
     state.briefing_sent = true;

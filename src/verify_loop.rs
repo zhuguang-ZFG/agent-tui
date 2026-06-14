@@ -752,6 +752,29 @@ pub fn verify_lead_identity_sync(project_dir: &Path) -> Result<()> {
     if !rules_body.contains(&lead) {
         bail!("orchestrator.mdc missing lead name {lead}");
     }
+    if !rules_body.contains("优势委派") {
+        bail!("orchestrator.mdc missing strength-based delegation guide");
+    }
+
+    let strengths = project_dir.join(".agents/STRENGTHS.md");
+    if !strengths.is_file() {
+        bail!("STRENGTHS.md missing after sync-lead");
+    }
+    let strengths_body = std::fs::read_to_string(&strengths)?;
+    if !strengths_body.contains("优势委派") {
+        bail!("STRENGTHS.md missing 优势委派 section");
+    }
+
+    let hint = crate::agent_strengths::delegation_mismatch(
+        &agents,
+        &lead,
+        "codex",
+        "ui-dashboard",
+        "React dashboard 组件与 Tailwind 样式",
+    );
+    if hint.is_none() {
+        bail!("delegation mismatch: expected UI task on codex to suggest kimi");
+    }
 
     let agents_md = spec.worktree.join("AGENTS.md");
     if agents_md.is_file() {
@@ -989,7 +1012,8 @@ pub fn run_all(project_dir: &Path) -> Result<()> {
     println!("  lead followup: 回执 pending → 续派 plan 清除 ✓");
     println!("  lead transcript: tail 扫描 agent-plan → 自动派发 ✓");
     println!("  DAG cycle: 环依赖拒绝委派 ✓");
-    println!("  lead identity: sync-lead + orchestrator.mdc + LEAD.md ✓");
+    println!("  lead identity: sync-lead + orchestrator.mdc + LEAD.md + STRENGTHS ✓");
+    println!("  strength delegate: UI→codex 错配提示 ✓");
     println!("  relay persist: relay_cursor.json 重启恢复 ✓");
     println!("  blocked: max nudges → advisor 自动升级 ✓");
     println!("  review gate: done → task-review → merge-ready ✓");
