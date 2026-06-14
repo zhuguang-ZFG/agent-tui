@@ -21,9 +21,9 @@ pub struct ReportWatchState {
 }
 
 impl ReportWatchState {
-    pub fn new() -> Self {
+    pub fn new(project_dir: &Path) -> Self {
         Self {
-            seen_reports: HashSet::new(),
+            seen_reports: crate::coord_dedupe::load_report_fingerprints(project_dir),
         }
     }
 }
@@ -75,14 +75,8 @@ fn parse_report_payload(json: &str) -> Vec<ReportItem> {
     Vec::new()
 }
 
-fn report_fingerprint(reporter: &str, item: &ReportItem) -> String {
-    format!(
-        "{}:{}:{}:{}",
-        reporter,
-        item.task,
-        item.status,
-        item.summary.trim()
-    )
+fn report_dedupe_key(reporter: &str, item: &ReportItem) -> String {
+    crate::coord_dedupe::report_key(reporter, &item.task, &item.status)
 }
 
 fn normalize_status(status: &str) -> String {
@@ -100,6 +94,7 @@ pub fn reports_from_text(
     reporter: &str,
     text: &str,
     seen: &mut HashSet<String>,
+    project_dir: Option<&Path>,
 ) -> Vec<ReportItem> {
     let mut out = Vec::new();
     for block in collect_report_blocks(text) {
@@ -108,11 +103,14 @@ pub fn reports_from_text(
                 continue;
             }
             item.status = normalize_status(&item.status).to_string();
-            let fp = report_fingerprint(reporter, &item);
-            if seen.contains(&fp) {
+            let key = report_dedupe_key(reporter, &item);
+            if seen.contains(&key) {
                 continue;
             }
-            seen.insert(fp);
+            seen.insert(key.clone());
+            if let Some(dir) = project_dir {
+                crate::coord_dedupe::remember_report_fingerprint(dir, &key);
+            }
             out.push(item);
         }
     }
@@ -144,7 +142,12 @@ pub fn watch_worker_panes(
             continue;
         }
         let text = pane.transcript_text();
-        let items = reports_from_text(&reporter, &text, &mut state.seen_reports);
+        let items = reports_from_text(
+            &reporter,
+            &text,
+            &mut state.seen_reports,
+            Some(project_dir),
+        );
         for item in items {
             match delegation::report_task_auto(
                 project_dir,
@@ -183,7 +186,7 @@ mod tests {
 ```
 "#;
         let mut seen = HashSet::new();
-        let items = reports_from_text("codex", text, &mut seen);
+        let items = reports_from_text("codex", text, &mut seen, None);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].task, "auth-api");
         assert_eq!(items[0].status, "done");
@@ -200,7 +203,7 @@ mod tests {
 ```
 "#;
         let mut seen = HashSet::new();
-        let items = reports_from_text("codex", text, &mut seen);
+        let items = reports_from_text("codex", text, &mut seen, None);
         assert_eq!(items.len(), 1);
     }
 }

@@ -52,7 +52,7 @@ fn verify_plan_parser_live(project_dir: &Path) -> Result<()> {
     wait_for_transcript(&pane, &task, TIMEOUT_MS)?;
     let text = pane.transcript_text();
     let mut seen = std::collections::HashSet::new();
-    let plans = lead_watch::plans_from_text(&text, &names, &mut seen);
+    let plans = lead_watch::plans_from_text(&text, &names, &mut seen, None);
     if plans.iter().any(|p| p.task == task) {
         return Ok(());
     }
@@ -70,7 +70,7 @@ fn verify_report_parser_live(project_dir: &Path) -> Result<()> {
     wait_for_transcript(&pane, &task, TIMEOUT_MS)?;
     let text = pane.transcript_text();
     let mut seen = std::collections::HashSet::new();
-    let reports = report_watch::reports_from_text("codex", &text, &mut seen);
+    let reports = report_watch::reports_from_text("codex", &text, &mut seen, None);
     if reports.iter().any(|r| r.task == task && r.status == "done") {
         return Ok(());
     }

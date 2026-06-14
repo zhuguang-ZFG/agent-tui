@@ -29,17 +29,19 @@ pub struct RelayState {
     pub cursor: usize,
     pub mailbox_line: usize,
     pub dedupe_keys: HashSet<String>,
+    project_dir: Option<std::path::PathBuf>,
     last_sent: Vec<Option<Instant>>,
     /// Deferred Enter injections so workers start after delegate notify.
     pub wake_after: Vec<(usize, Instant)>,
 }
 
 impl RelayState {
-    pub fn new(agent_count: usize) -> Self {
+    pub fn new(project_dir: &std::path::Path, agent_count: usize) -> Self {
         Self {
             cursor: 0,
             mailbox_line: 0,
-            dedupe_keys: HashSet::new(),
+            dedupe_keys: crate::coord_dedupe::load_relay_dedupe(project_dir),
+            project_dir: Some(project_dir.to_path_buf()),
             last_sent: vec![None; agent_count],
             wake_after: Vec::new(),
         }
@@ -47,6 +49,13 @@ impl RelayState {
 
     pub fn resize(&mut self, agent_count: usize) {
         self.last_sent.resize(agent_count, None);
+    }
+
+    pub fn remember_dedupe(&mut self, key: &str) {
+        self.dedupe_keys.insert(key.to_string());
+        if let Some(dir) = self.project_dir.as_ref() {
+            crate::coord_dedupe::remember_relay_dedupe(dir, key);
+        }
     }
 }
 
@@ -128,12 +137,19 @@ pub fn dispatch(
     }
 
     for event in pending {
-        // Claim/release are bookkeeping only; notify already carries instructions.
         if event.kind == "claim" {
             state.cursor = event.line_no;
             continue;
         }
         let targets = relay_targets(agent_names, event);
+        if targets.is_empty() {
+            state.cursor = event.line_no;
+            continue;
+        }
+
+        let mut pending_targets = 0usize;
+        let mut delivered_targets = 0usize;
+
         for idx in targets {
             if event.kind == "claim" && notify_targets.contains(&idx) {
                 continue;
@@ -141,6 +157,7 @@ pub fn dispatch(
             if should_skip_sender(idx, agent_names, &event.from) {
                 continue;
             }
+            pending_targets += 1;
             if !cooldown_ready(state, idx, config.cooldown, &event.kind) {
                 continue;
             }
@@ -163,14 +180,19 @@ pub fn dispatch(
                         &event.message,
                         target,
                         &event.from,
+                        event.time.as_deref(),
                     ) {
-                        state.dedupe_keys.insert(key);
+                        state.remember_dedupe(&key);
                     }
                 }
             }
             delivered += 1;
+            delivered_targets += 1;
         }
-        state.cursor = event.line_no;
+
+        if pending_targets == 0 || delivered_targets == pending_targets {
+            state.cursor = event.line_no;
+        }
     }
     delivered
 }
@@ -228,5 +250,29 @@ mod tests {
             format_injection(&event),
             "[协调/mimo->claude] 请 review"
         );
+    }
+
+    #[test]
+    fn cursor_holds_when_pane_missing() {
+        let events = vec![CoordEvent {
+            line_no: 1,
+            time: Some("2026-01-01T00:00:00Z".into()),
+            kind: "notify".into(),
+            agent: Some("codex".into()),
+            message: "【委派·auth-api】请开始".into(),
+            from: "cursor".into(),
+            task: None,
+            action: None,
+        }];
+        let names = vec!["cursor".into(), "codex".into()];
+        let mut panes: Vec<Option<AgentPane>> = vec![None, None];
+        let mut state = RelayState::new(std::path::Path::new("."), 2);
+        let config = RelayConfig {
+            enabled: true,
+            cooldown: Duration::from_secs(12),
+        };
+        let delivered = dispatch(&config, &mut state, &names, &mut panes, &events);
+        assert_eq!(delivered, 0);
+        assert_eq!(state.cursor, 0, "cursor must not advance when PTY missing");
     }
 }

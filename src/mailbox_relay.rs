@@ -38,16 +38,21 @@ pub fn events_relay_enabled() -> bool {
 
 /// Dedupe key shared with events relay to avoid double PTY inject.
 pub fn dedupe_key_for_mailbox(entry: &MailboxEntry) -> Option<String> {
-    let task = entry.task.as_deref()?;
     match entry.kind.as_str() {
-        "delegate" => Some(format!("delegate:{}:{}", entry.to, task)),
-        "report" => Some(format!("report:{}:{}", entry.from, task)),
+        "delegate" => {
+            let task = entry.task.as_deref()?;
+            Some(format!("delegate:{}:{}", entry.to, task))
+        }
+        "report" => {
+            let task = entry.task.as_deref()?;
+            Some(format!("report:{}:{}", entry.from, task))
+        }
         "user_task" => Some(format!("user_task:{}:{}", entry.to, entry.time)),
         _ => None,
     }
 }
 
-pub fn dedupe_key_for_notify(message: &str, target: &str, from: &str) -> Option<String> {
+pub fn dedupe_key_for_notify(message: &str, target: &str, from: &str, time: Option<&str>) -> Option<String> {
     if message.contains("【委派·") {
         let task = extract_task(message)?;
         return Some(format!("delegate:{target}:{task}"));
@@ -57,6 +62,9 @@ pub fn dedupe_key_for_notify(message: &str, target: &str, from: &str) -> Option<
         return Some(format!("report:{from}:{task}"));
     }
     if message.contains("【用户任务】") {
+        if let Some(t) = time.filter(|s| !s.is_empty()) {
+            return Some(format!("user_task:{target}:{t}"));
+        }
         return Some(format!("user_task:{target}:{from}"));
     }
     None
@@ -130,31 +138,36 @@ pub fn dispatch_from_mailbox(
     }
 
     let mut delivered = 0usize;
-    for (offset, entry) in entries.iter().enumerate() {
-        state.mailbox_line += 1;
+    for entry in entries.iter() {
         if !should_relay_kind(&entry.kind) {
+            state.mailbox_line += 1;
             continue;
         }
         let Some(key) = dedupe_key_for_mailbox(entry) else {
+            state.mailbox_line += 1;
             continue;
         };
         if state.dedupe_keys.contains(&key) {
+            state.mailbox_line += 1;
             continue;
         }
         let Some(idx) = agent_names
             .iter()
             .position(|n| n.eq_ignore_ascii_case(&entry.to))
         else {
+            state.mailbox_line += 1;
             continue;
         };
         if agent_names
             .get(idx)
             .is_some_and(|n| n.eq_ignore_ascii_case(&entry.from))
         {
+            state.mailbox_line += 1;
             continue;
         }
         let Some(pane) = panes.get(idx).and_then(|p| p.as_ref()) else {
-            continue;
+            // PTY not ready — do not advance; retry on next tick.
+            break;
         };
         let line = format_mailbox_injection(entry);
         pane.inject_line(&line);
@@ -167,9 +180,9 @@ pub fn dispatch_from_mailbox(
                 .wake_after
                 .push((idx, t0 + Duration::from_millis(2000)));
         }
-        state.dedupe_keys.insert(key);
+        state.remember_dedupe(&key);
+        state.mailbox_line += 1;
         delivered += 1;
-        let _ = offset;
     }
     delivered
 }
@@ -196,7 +209,28 @@ mod tests {
         let msg = "【委派·auth-api】请开始";
         assert_eq!(
             dedupe_key_for_mailbox(&entry),
-            dedupe_key_for_notify(msg, "codex", "cursor")
+            dedupe_key_for_notify(msg, "codex", "cursor", Some("t"))
         );
+    }
+
+    #[test]
+    fn user_task_dedupe_uses_time_when_present() {
+        let k1 = dedupe_key_for_notify(
+            "【用户任务】x",
+            "cursor",
+            "user",
+            Some("2026-01-01"),
+        );
+        assert_eq!(k1.as_deref(), Some("user_task:cursor:2026-01-01"));
+        let entry = MailboxEntry {
+            time: "2026-01-01".into(),
+            from: "user".into(),
+            to: "cursor".into(),
+            kind: "user_task".into(),
+            task: None,
+            body: "x".into(),
+            source: "x".into(),
+        };
+        assert_eq!(dedupe_key_for_mailbox(&entry), k1);
     }
 }

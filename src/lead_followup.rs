@@ -133,13 +133,6 @@ pub fn on_worker_report(
     Ok(())
 }
 
-pub fn on_plan_dispatched(project_dir: &Path, dispatched: usize) {
-    if !followup_enabled() || dispatched == 0 {
-        return;
-    }
-    let _ = mark_all_satisfied(project_dir, "plan_dispatched");
-}
-
 pub fn mark_all_satisfied(project_dir: &Path, reason: &str) -> Result<usize> {
     let path = followup_path(project_dir);
     let Ok(content) = fs::read_to_string(&path) else {
@@ -173,10 +166,6 @@ pub fn mark_all_satisfied(project_dir: &Path, reason: &str) -> Result<usize> {
         );
     }
     Ok(changed)
-}
-
-pub fn transcript_has_agent_plan(text: &str) -> bool {
-    transcript_tail(text).contains("```agent-plan") || transcript_tail(text).contains("``` agent-plan")
 }
 
 fn due_timestamp(secs_from_now: u64) -> String {
@@ -238,6 +227,7 @@ pub fn scan_transcript_and_dispatch(
         tail,
         agent_names,
         lead_watch.followup_plan_seen_mut(),
+        Some(project_dir),
     );
     if items.is_empty() {
         return 0;
@@ -286,15 +276,9 @@ pub fn process_pending(
     if let Some(ref t) = text {
         out.dispatched = scan_transcript_and_dispatch(project_dir, lead, agent_names, t, lead_watch);
         if out.dispatched > 0 {
-            out.satisfied = mark_all_satisfied(project_dir, "followup_transcript_dispatch").unwrap_or(0);
+            out.satisfied =
+                mark_all_satisfied(project_dir, "followup_transcript_dispatch").unwrap_or(0);
             lead_watch.clear_followup_scan();
-            return out;
-        }
-        if transcript_has_agent_plan(t) {
-            out.satisfied = mark_all_satisfied(project_dir, "transcript_agent_plan").unwrap_or(0);
-            if out.satisfied > 0 {
-                lead_watch.clear_followup_scan();
-            }
             return out;
         }
     }
@@ -374,12 +358,6 @@ pub fn watch_lead_followup(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn detects_plan_fence_in_tail() {
-        assert!(transcript_has_agent_plan("```agent-plan\n[]\n```"));
-        assert!(!transcript_has_agent_plan("no plan here"));
-    }
 
     #[test]
     fn nudge_hint_by_status() {

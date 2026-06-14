@@ -55,9 +55,9 @@ pub struct LeadWatchState {
 }
 
 impl LeadWatchState {
-    pub fn new() -> Self {
+    pub fn new(project_dir: &Path) -> Self {
         Self {
-            seen_plans: HashSet::new(),
+            seen_plans: crate::coord_dedupe::load_plan_fingerprints(project_dir),
             briefing_sent: false,
             briefing_after: None,
             briefing_retries: Vec::new(),
@@ -75,6 +75,10 @@ impl LeadWatchState {
 
     pub fn followup_plan_seen_mut(&mut self) -> &mut HashSet<String> {
         &mut self.followup_plan_seen
+    }
+
+    pub fn seen_plans_mut(&mut self) -> &mut HashSet<String> {
+        &mut self.seen_plans
     }
 
     pub fn arm_briefing(&mut self, after: Instant) {
@@ -204,7 +208,12 @@ fn plan_fingerprint(block: &str, items: &[PlanItem]) -> String {
 }
 
 /// Parse transcript text and return delegatable plan items (deduped by fingerprint).
-pub fn plans_from_text(text: &str, agent_names: &[String], seen: &mut HashSet<String>) -> Vec<PlanItem> {
+pub fn plans_from_text(
+    text: &str,
+    agent_names: &[String],
+    seen: &mut HashSet<String>,
+    project_dir: Option<&Path>,
+) -> Vec<PlanItem> {
     let mut out = Vec::new();
     for block in collect_plan_blocks(text) {
         let items = parse_plan_items(&block, agent_names);
@@ -225,10 +234,17 @@ pub fn plans_from_text(text: &str, agent_names: &[String], seen: &mut HashSet<St
         if !block_ok {
             continue;
         }
-        seen.insert(fp);
+        seen.insert(fp.clone());
+        if let Some(dir) = project_dir {
+            crate::coord_dedupe::remember_plan_fingerprint(dir, &fp);
+        }
         out.extend(items);
     }
     out
+}
+
+fn followup_satisfying_sources(source: &str) -> bool {
+    !matches!(source, "cli" | "plan_dry_run")
 }
 
 /// Schedule and dispatch plan items (transcript, plan_inbox, or CLI).
@@ -241,6 +257,7 @@ pub fn dispatch_plan_items(
     if items.is_empty() {
         return 0;
     }
+    let had_pending = crate::lead_followup::pending_count(project_dir) > 0;
     if source != "plan_inbox" {
         let _ = crate::plan_inbox::append_items(project_dir, lead, &items, source);
     }
@@ -310,7 +327,12 @@ pub fn dispatch_plan_items(
         let summary = format!("主 Agent 按计划派发 {executed} 个子任务（{source}）");
         let _ = agent_memory::on_plan_dispatch(project_dir, lead, &summary);
         terminal::log_message(project_dir, "info", &summary);
-        crate::lead_followup::on_plan_dispatched(project_dir, executed);
+        if had_pending && followup_satisfying_sources(source) {
+            let _ = crate::lead_followup::mark_all_satisfied(
+                project_dir,
+                &format!("plan_dispatch:{source}"),
+            );
+        }
     }
     executed
 }
@@ -333,7 +355,12 @@ pub fn watch_lead_pane(
     };
 
     let screen = pane.transcript_text();
-    let items = plans_from_text(&screen, agent_names, &mut state.seen_plans);
+    let items = plans_from_text(
+        &screen,
+        agent_names,
+        &mut state.seen_plans,
+        Some(project_dir),
+    );
     dispatch_plan_items(project_dir, lead, items, "transcript")
 }
 
@@ -631,7 +658,7 @@ mod tests {
 "#;
         let names = vec!["codex".into(), "cursor".into()];
         let mut seen = HashSet::new();
-        let items = plans_from_text(text, &names, &mut seen);
+        let items = plans_from_text(text, &names, &mut seen, None);
         assert_eq!(items.len(), 1);
     }
 
@@ -640,7 +667,7 @@ mod tests {
         let text = r#"plan: [{"worker":"kimi","task":"ui-login","description":"页面"}] done"#;
         let names = vec!["kimi".into(), "cursor".into()];
         let mut seen = HashSet::new();
-        let items = plans_from_text(text, &names, &mut seen);
+        let items = plans_from_text(text, &names, &mut seen, None);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].task, "ui-login");
     }

@@ -1,6 +1,7 @@
 mod agent_memory;
 mod app;
 mod claims;
+mod coord_dedupe;
 mod config;
 mod conpty;
 mod dead_letter;
@@ -387,7 +388,7 @@ fn run_command(cmd: Commands) -> Result<()> {
                 text
             };
             let mut seen = std::collections::HashSet::new();
-            let items = lead_watch::plans_from_text(&text, &names, &mut seen);
+            let items = lead_watch::plans_from_text(&text, &names, &mut seen, Some(&project_dir));
             if items.is_empty() {
                 println!("未解析到可派发的 agent-plan");
                 std::process::exit(1);
@@ -460,7 +461,7 @@ fn run_command(cmd: Commands) -> Result<()> {
                 lead_watch::parse_plan_items(&text, &names)
             } else {
                 let mut seen = std::collections::HashSet::new();
-                lead_watch::plans_from_text(&text, &names, &mut seen)
+                lead_watch::plans_from_text(&text, &names, &mut seen, Some(&project_dir))
             };
             if items.is_empty() {
                 println!("未解析到 plan 条目");

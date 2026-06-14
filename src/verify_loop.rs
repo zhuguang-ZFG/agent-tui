@@ -64,7 +64,7 @@ pub fn verify_parsers() -> Result<()> {
 ```
 "#;
     let mut seen = HashSet::new();
-    let plans = lead_watch::plans_from_text(plan_text, &names, &mut seen);
+    let plans = lead_watch::plans_from_text(plan_text, &names, &mut seen, None);
     if plans.len() != 1 {
         bail!("plan parser: expected 1 item, got {}", plans.len());
     }
@@ -75,7 +75,7 @@ pub fn verify_parsers() -> Result<()> {
 ```
 "#;
     let mut seen_r = HashSet::new();
-    let reports = report_watch::reports_from_text("codex", report_text, &mut seen_r);
+    let reports = report_watch::reports_from_text("codex", report_text, &mut seen_r, None);
     if reports.len() != 1 || reports[0].status != "done" {
         bail!("report parser: unexpected {:?}", reports);
     }
@@ -111,7 +111,7 @@ pub fn verify_events_chain(project_dir: &Path) -> Result<VerifyOutcome> {
 
     let names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
     let mut seen = HashSet::new();
-    let plans = lead_watch::plans_from_text(&plan_text, &names, &mut seen);
+    let plans = lead_watch::plans_from_text(&plan_text, &names, &mut seen, None);
     if plans.len() != 1 {
         bail!("expected 1 plan item, got {}", plans.len());
     }
@@ -135,7 +135,7 @@ pub fn verify_events_chain(project_dir: &Path) -> Result<VerifyOutcome> {
 "#
     );
     let mut seen_r = HashSet::new();
-    let reports = report_watch::reports_from_text("codex", &report_text, &mut seen_r);
+    let reports = report_watch::reports_from_text("codex", &report_text, &mut seen_r, None);
     if reports.len() != 1 {
         bail!("expected 1 report, got {}", reports.len());
     }
@@ -566,7 +566,7 @@ pub fn verify_lead_transcript_followup_chain(project_dir: &Path) -> Result<()> {
 "#
     );
 
-    let mut lead_watch = lead_watch::LeadWatchState::new();
+    let mut lead_watch = lead_watch::LeadWatchState::new(project_dir);
     let outcome = lead_followup::process_transcript_text(
         project_dir,
         &lead,
@@ -596,8 +596,79 @@ pub fn verify_lead_transcript_followup_chain(project_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Relay must not skip events when target PTY is not ready.
+pub fn verify_relay_cursor_hold() -> Result<()> {
+    use std::time::Duration;
+
+    use crate::meta::CoordEvent;
+    use crate::relay::{dispatch, RelayConfig, RelayState};
+
+    let events = vec![CoordEvent {
+        line_no: 1,
+        time: Some("2026-01-01T00:00:00Z".into()),
+        kind: "notify".into(),
+        agent: Some("codex".into()),
+        message: "【委派·relay-hold】请开始".into(),
+        from: "cursor".into(),
+        task: None,
+        action: None,
+    }];
+    let names = vec!["cursor".into(), "codex".into()];
+    let mut panes: Vec<Option<crate::pane::AgentPane>> = vec![None, None];
+    let mut state = RelayState::new(std::path::Path::new("."), 2);
+    let config = RelayConfig {
+        enabled: true,
+        cooldown: Duration::from_secs(12),
+    };
+    let delivered = dispatch(&config, &mut state, &names, &mut panes, &events);
+    if delivered != 0 {
+        bail!("relay hold: expected 0 deliveries without PTY");
+    }
+    if state.cursor != 0 {
+        bail!("relay hold: cursor advanced without delivery (cursor={})", state.cursor);
+    }
+    Ok(())
+}
+
+/// Plan fingerprints survive LeadWatchState restart (persistent dedupe).
+pub fn verify_persistent_plan_dedupe(project_dir: &Path) -> Result<()> {
+    let agents = load_agents(project_dir)?;
+    let names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
+    let task = unique_task("dedupe-plan");
+    let text = format!(
+        r#"
+```agent-plan
+[{{"worker":"codex","task":"{task}","description":"dedupe"}}]
+```
+"#
+    );
+    let mut first = lead_watch::LeadWatchState::new(project_dir);
+    let n1 = lead_watch::plans_from_text(
+        &text,
+        &names,
+        first.seen_plans_mut(),
+        Some(project_dir),
+    );
+    if n1.len() != 1 {
+        bail!("persistent dedupe: expected 1 plan item, got {}", n1.len());
+    }
+    let mut second = lead_watch::LeadWatchState::new(project_dir);
+    let n2 = lead_watch::plans_from_text(
+        &text,
+        &names,
+        second.seen_plans_mut(),
+        Some(project_dir),
+    );
+    if !n2.is_empty() {
+        bail!("persistent dedupe: restart re-dispatched {} items", n2.len());
+    }
+    Ok(())
+}
+
 pub fn run_all(project_dir: &Path) -> Result<()> {
     verify_parsers().context("parser checks")?;
+    verify_relay_cursor_hold().context("relay cursor hold")?;
+    verify_persistent_plan_dedupe(project_dir).context("persistent plan dedupe")?;
     let outcome = verify_events_chain(project_dir).context("events chain")?;
     let retry_outcome = verify_failed_retry_chain(project_dir).context("failed→retry chain")?;
     let dag_outcome = verify_dag_chain(project_dir).context("DAG chain")?;
@@ -633,6 +704,8 @@ pub fn run_all(project_dir: &Path) -> Result<()> {
     );
     println!("  lead followup: 回执 pending → 续派 plan 清除 ✓");
     println!("  lead transcript: tail 扫描 agent-plan → 自动派发 ✓");
+    println!("  relay: PTY 未就绪时不推进游标 ✓");
+    println!("  dedupe: plan 指纹重启后仍有效 ✓");
     println!("  observer: /api/snapshot + SSE stream ✓");
     Ok(())
 }
