@@ -92,6 +92,10 @@ struct Cli {
     #[arg(long)]
     solo: bool,
 
+    /// Spawn all agents at startup (default: lazy — only Lead, others on demand)
+    #[arg(long)]
+    eager: bool,
+
     /// Load config and print agents, then exit (no TUI)
     #[arg(long)]
     check: bool,
@@ -109,6 +113,8 @@ enum Commands {
         agent: Option<String>,
         #[arg(long)]
         solo: bool,
+        #[arg(long)]
+        eager: bool,
     },
     /// Agent 间发消息（写入 inbox + events，TUI 运行时会自动注入 PTY）
     Notify {
@@ -362,6 +368,7 @@ fn main() -> Result<()> {
         cli.max_agents,
         cli.agent.as_deref(),
         cli.solo,
+        cli.eager,
         cli.check,
     )
 }
@@ -371,6 +378,7 @@ fn run_tui(
     max_agents: Option<usize>,
     initial_agent: Option<&str>,
     solo_on_start: bool,
+    eager_spawn: bool,
     check_only: bool,
 ) -> Result<()> {
     let project_dir = project_init::ensure_project_ready(project_dir)?;
@@ -406,6 +414,7 @@ fn run_tui(
         max_agents,
         initial_agent,
         solo_on_start,
+        eager_spawn,
     );
     terminal::restore_host_terminal();
     guard.disarm();
@@ -424,6 +433,7 @@ fn run(
     max_agents: Option<usize>,
     initial_agent: Option<&str>,
     solo_on_start: bool,
+    eager_spawn: bool,
 ) -> Result<()> {
     let mut app = app::App::new(project_dir.clone())?;
     if let Some(max) = max_agents {
@@ -446,7 +456,7 @@ fn run(
     let _ = _observer_guard;
 
     let size = terminal.size()?;
-    app.queue_spawn_all(size.height, size.width);
+    app.queue_spawn_all(size.height, size.width, eager_spawn);
     app.dirty = true;
 
     loop {
@@ -511,7 +521,8 @@ fn run_command(cmd: Commands) -> Result<()> {
             max_agents,
             agent,
             solo,
-        } => return run_tui(project_dir, max_agents, agent.as_deref(), solo, false),
+            eager,
+        } => return run_tui(project_dir, max_agents, agent.as_deref(), solo, eager, false),
         Commands::Notify {
             agent,
             message,

@@ -239,7 +239,7 @@ fn cooldown_ready(state: &RelayState, index: usize, cooldown: Duration, kind: &s
     }
 }
 
-fn relay_targets(agent_names: &[String], event: &CoordEvent) -> Vec<usize> {
+pub fn relay_targets(agent_names: &[String], event: &CoordEvent) -> Vec<usize> {
     match event.kind.as_str() {
         "notify" => agent_names
             .iter()

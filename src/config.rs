@@ -488,6 +488,8 @@ fn apply_pty_env(cmd: &mut portable_pty::CommandBuilder) {
     cmd.env("CLICOLOR_FORCE", "1");
     #[cfg(windows)]
     cmd.env("VTE_VERSION", "6800");
+    // Limit Node.js V8 heap to 512MB per agent to prevent OOM with many agents
+    cmd.env("NODE_OPTIONS", "--max-old-space-size=512");
 }
 
 #[cfg(windows)]

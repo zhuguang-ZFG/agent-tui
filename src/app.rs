@@ -13,6 +13,8 @@ use crate::health::{self, HealthState};
 use crate::confirm_panel::ConfirmPanel;
 use crate::help_panel::HelpPanel;
 use crate::inbox_ui::InboxPanel;
+use crate::mailbox;
+use crate::terminal::log_message;
 use crate::events_ui::EventsPanel;
 use crate::lead_followup;
 use crate::lead_watch::{self, LeadWatchState};
@@ -30,6 +32,8 @@ use crate::ops;
 
 const MAX_PANES: usize = 8;
 const SPAWN_STAGGER_MS: u64 = 2000;
+/// Agent 数 > 此阈值时，默认启用按需启动（仅启动 Lead，其他按需）
+const LAZY_THRESHOLD: usize = 4;
 const PTY_RESIZE_WARMUP: Duration = Duration::from_secs(5);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(2);
 const META_INTERVAL: Duration = Duration::from_secs(5);
@@ -80,6 +84,8 @@ pub struct App {
     restart_counts: Vec<u32>,
     last_restart_at: Vec<Option<Instant>>,
     spawn_finished_at: Option<Instant>,
+    /// Agent indices that are lazy-pending (not yet spawned, will spawn on demand)
+    pub lazy_agents: Vec<usize>,
     last_health_check: Instant,
     last_meta_refresh: Instant,
     last_pr_poll: Instant,
@@ -130,6 +136,7 @@ impl App {
             restart_counts: Vec::new(),
             last_restart_at: Vec::new(),
             spawn_finished_at: None,
+            lazy_agents: Vec::new(),
             last_health_check: Instant::now(),
             last_meta_refresh: Instant::now(),
             last_pr_poll: Instant::now(),
@@ -282,7 +289,9 @@ impl App {
     }
 
     /// Start agents in background threads so the event loop keeps running (avoids Windows console freeze/exit).
-    pub fn queue_spawn_all(&mut self, rows: u16, cols: u16) {
+    /// When `eager` is false and agent count > LAZY_THRESHOLD, only spawn the Lead agent;
+    /// others are marked as lazy and spawned on demand.
+    pub fn queue_spawn_all(&mut self, rows: u16, cols: u16, eager: bool) {
         self.terminal_rows = rows;
         self.terminal_cols = cols;
         if self.agents.is_empty() {
@@ -299,22 +308,54 @@ impl App {
         }
 
         let count = self.panes.len();
+
+        // Lazy spawn: only Lead agent at startup when many agents
+        let use_lazy = !eager && count > LAZY_THRESHOLD;
+        let lead_index = self.agents.iter().position(|a| a.name == self.lead_agent);
+
+        // Determine which indices to spawn now vs later
+        let spawn_now: Vec<usize> = if use_lazy {
+            lead_index.map(|i| vec![i]).unwrap_or_else(|| (0..count).collect())
+        } else {
+            (0..count).collect()
+        };
+        let lazy_indices: Vec<usize> = (0..count)
+            .filter(|i| !spawn_now.contains(i))
+            .collect();
+        self.lazy_agents = lazy_indices.clone();
+
+        if use_lazy && !lazy_indices.is_empty() {
+            let lazy_names: Vec<&str> = lazy_indices
+                .iter()
+                .filter_map(|&i| self.agents.get(i).map(|a| a.name.as_str()))
+                .collect();
+            self.status = format!(
+                "Lead ({}) 启动中… {} 个 Agent 待命（委派时自动启动）",
+                self.lead_agent,
+                lazy_indices.len(),
+            );
+            log_message(&self.project_dir, "info",
+                &format!("lazy spawn: lead={}, deferred={:?}", self.lead_agent, lazy_names));
+        } else {
+            self.status = format!("正在启动 {count} 个 Agent…");
+        }
+
         let (per_rows, per_cols) = estimate_pane_size(rows, cols, count);
         let (tx, rx) = mpsc::channel();
-        self.status = format!("正在启动 {count} 个 Agent…");
         self.pending_spawn = Some(PendingSpawn {
             rx,
-            total: count,
+            total: spawn_now.len(),
             done: 0,
         });
         self.dirty = true;
 
-        for (i, spec) in self.agents.iter().enumerate().take(count) {
+        for &i in &spawn_now {
             let tx = tx.clone();
-            let spec = spec.clone();
+            let spec = self.agents[i].clone();
             let project_dir = self.project_dir.clone();
             let lead = self.lead_agent.clone();
-            let delay_ms = (i as u64).saturating_mul(SPAWN_STAGGER_MS);
+            let stagger_pos = spawn_now.iter().position(|&x| x == i).unwrap_or(0);
+            let delay_ms = (stagger_pos as u64).saturating_mul(SPAWN_STAGGER_MS);
             thread::spawn(move || {
                 if delay_ms > 0 {
                     thread::sleep(Duration::from_millis(delay_ms));
@@ -362,6 +403,70 @@ impl App {
             });
         }
         drop(tx);
+    }
+
+    /// Spawn a specific lazy agent on demand (called when it receives a task or user focuses it).
+    /// Returns true if the agent was actually spawned.
+    pub fn spawn_on_demand(&mut self, index: usize) -> bool {
+        if !self.lazy_agents.contains(&index) {
+            return false;
+        }
+        // Don't queue if already spawning
+        if self.pending_spawn.is_some() {
+            return false;
+        }
+        let name = self.agents.get(index).map(|a| a.name.clone()).unwrap_or_default();
+        log_message(&self.project_dir, "info",
+            &format!("on-demand spawn: {} (index={})", name, index));
+        self.status = format!("正在启动 {} …", name);
+        self.lazy_agents.retain(|&i| i != index);
+        self.queue_spawn_indices(&[index]);
+        self.dirty = true;
+        true
+    }
+
+    /// Check pending coord events and spawn any lazy agents that would receive them.
+    /// Also checks mailbox entries for pending delegates to lazy agents.
+    fn auto_spawn_lazy_targets(&mut self) {
+        if self.lazy_agents.is_empty() || self.pending_spawn.is_some() {
+            return;
+        }
+        let names: Vec<String> = self.agents.iter().map(|a| a.name.clone()).collect();
+        let mut targets_to_spawn: Vec<usize> = Vec::new();
+
+        // Check coord events for targets
+        let cursor = self.relay.cursor;
+        for event in &self.coord_events {
+            if event.line_no <= cursor {
+                continue;
+            }
+            for idx in relay::relay_targets(&names, event) {
+                if self.lazy_agents.contains(&idx) && !targets_to_spawn.contains(&idx) {
+                    targets_to_spawn.push(idx);
+                }
+            }
+        }
+
+        // Check mailbox entries for delegate targets
+        let mb_line = self.relay.mailbox_line;
+        let entries = mailbox::load_entries_from_line(&self.project_dir, mb_line);
+        for entry in &entries {
+            if let Some(idx) = names.iter().position(|n| n.eq_ignore_ascii_case(&entry.to)) {
+                if self.lazy_agents.contains(&idx) && !targets_to_spawn.contains(&idx) {
+                    targets_to_spawn.push(idx);
+                }
+            }
+        }
+
+        if !targets_to_spawn.is_empty() {
+            let target_names: Vec<&str> = targets_to_spawn.iter()
+                .filter_map(|&i| self.agents.get(i).map(|a| a.name.as_str()))
+                .collect();
+            log_message(&self.project_dir, "info",
+                &format!("auto-spawn lazy targets: {:?}", target_names));
+            self.lazy_agents.retain(|i| !targets_to_spawn.contains(i));
+            self.queue_spawn_indices(&targets_to_spawn);
+        }
     }
 
     fn failed_spawn_indices(&self) -> Vec<usize> {
@@ -504,7 +609,7 @@ impl App {
 
     #[allow(dead_code)]
     pub fn spawn_all(&mut self, rows: u16, cols: u16) {
-        self.queue_spawn_all(rows, cols);
+        self.queue_spawn_all(rows, cols, true);
         while self.pending_spawn.is_some() {
             self.poll_pending_spawns();
             thread::sleep(Duration::from_millis(50));
@@ -571,6 +676,8 @@ impl App {
                 self.events.refresh(&self.project_dir);
             }
             self.sync_agent_meta();
+            // Auto-spawn lazy agents that have pending relay targets.
+            self.auto_spawn_lazy_targets();
             // Skip relay/orchestration until agents finished spawning.
             if self.pending_spawn.is_none() {
             let names: Vec<String> = self.agents.iter().map(|a| a.name.clone()).collect();
@@ -1048,6 +1155,8 @@ impl App {
                 KeyCode::Char(c @ '1'..='8') => {
                     let idx = (c as u8 - b'1') as usize;
                     if idx < self.panes.len() {
+                        // Auto-spawn lazy agent when user focuses it
+                        self.spawn_on_demand(idx);
                         self.set_focus(idx);
                     }
                     return;
@@ -1155,5 +1264,44 @@ pub fn poll_event(timeout: Duration) -> Result<Option<Event>> {
     match event::read() {
         Ok(ev) => Ok(Some(ev)),
         Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lazy_threshold_above_4() {
+        assert!(LAZY_THRESHOLD == 4);
+        // 5 agents should trigger lazy spawn
+        assert!(5 > LAZY_THRESHOLD);
+        // 4 or fewer should not
+        assert!(4 <= LAZY_THRESHOLD);
+        assert!(1 <= LAZY_THRESHOLD);
+    }
+
+    #[test]
+    fn lazy_spawn_indices_exclude_lead() {
+        // Simulate: 8 agents, lead at index 0
+        let count = 8;
+        let lead_index = Some(0usize);
+        let eager = false;
+        let use_lazy = !eager && count > LAZY_THRESHOLD;
+        assert!(use_lazy);
+        let spawn_now: Vec<usize> = lead_index.map(|i| vec![i]).unwrap_or_else(|| (0..count).collect());
+        assert_eq!(spawn_now, vec![0]);
+        let lazy_indices: Vec<usize> = (0..count).filter(|i| !spawn_now.contains(i)).collect();
+        assert_eq!(lazy_indices, vec![1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn eager_mode_spawns_all() {
+        let count = 8;
+        let eager = true;
+        let use_lazy = !eager && count > LAZY_THRESHOLD;
+        assert!(!use_lazy);
+        let spawn_now: Vec<usize> = (0..count).collect();
+        assert_eq!(spawn_now.len(), 8);
     }
 }

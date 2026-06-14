@@ -24,12 +24,19 @@ pub fn cheat_sheet(project_dir: Option<&Path>) -> String {
         n => format!("上 3 + 下 {} 网格", n - 3),
     };
 
+    let spawn_mode = if agent_count > 4 {
+        format!("Lead 优先启动，其余 {} 个按需", agent_count - 1)
+    } else {
+        format!("{agent_count} 个 Agent 同时启动")
+    };
+
     format!(
         r#"agent-tui 速查（只记 1 条）
 
   ★ agent-tui{project_hint}
     或 agent-tui up{project_hint}
     → 未 init 会自动初始化，{agent_count} Agent 自适应布局（{layout_desc}）
+    → {spawn_mode}（--eager 全启动）
 
   单格全屏：agent-tui --solo  |  F2 切换网格/全屏
 

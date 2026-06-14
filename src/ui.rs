@@ -469,20 +469,35 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                     .get(i)
                     .map(|a| a.command.as_str())
                     .unwrap_or("?");
+                let is_lazy = app.lazy_agents.contains(&i);
+                let (border_color, body) = if is_lazy {
+                    (
+                        Color::Yellow,
+                        format!(
+                            "⏳ {agent_name} 待命\n\n委派任务时自动启动\n按 {}/{} 手动启动",
+                            i + 1,
+                            (b'0' + (i as u8 + 1)) as char,
+                        ),
+                    )
+                } else {
+                    let reason = match &health {
+                        HealthState::Dead(r) => r.as_str(),
+                        _ => "启动失败",
+                    };
+                    (
+                        Color::Red,
+                        format!(
+                            "{reason}\n\ncmd: {cmd}\n\nF5 手动重试  |  Ctrl+I !doctor 体检",
+                        ),
+                    )
+                };
                 let block = ratatui::widgets::Block::default()
                     .title(title)
                     .borders(ratatui::widgets::Borders::ALL)
-                    .border_style(Style::default().fg(Color::Red));
-                let reason = match &health {
-                    HealthState::Dead(r) => r.as_str(),
-                    _ => "启动失败",
-                };
-                let body = format!(
-                    "{reason}\n\ncmd: {cmd}\n\nF5 手动重试  |  Ctrl+I !doctor 体检",
-                );
+                    .border_style(Style::default().fg(border_color));
                 let msg = Paragraph::new(body)
                     .block(block)
-                    .style(Style::default().fg(Color::DarkGray));
+                    .style(Style::default().fg(if is_lazy { Color::Yellow } else { Color::DarkGray }));
                 f.render_widget(msg, rect);
             }
         }
