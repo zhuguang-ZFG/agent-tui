@@ -1,3 +1,4 @@
+mod batch_review;
 mod agent_memory;
 mod agent_strengths;
 mod app;
@@ -221,6 +222,14 @@ enum Commands {
     },
     /// 汇总委派历史并更新 STRENGTHS.md（运行时进化）
     Evolve {
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
+    /// 计划完成后委派批次代码审查（reviewer）
+    Review {
+        /// 仅审查 task 前缀匹配的批次（同 AGENT_TUI_MERGE_BATCH）
+        #[arg(long)]
+        batch: Option<String>,
         #[arg(long)]
         project_dir: Option<PathBuf>,
     },
@@ -615,6 +624,12 @@ fn run_command(cmd: Commands) -> Result<()> {
             let project_dir = config::resolve_project_dir(project_dir)?;
             let n = delegation_stats::evolve_project(&project_dir)?;
             println!("已更新 .agents/STRENGTHS.md 历史表现（{n} 条委派记录）");
+        }
+        Commands::Review { batch, project_dir } => {
+            let project_dir = config::resolve_project_dir(project_dir)?;
+            let task_id =
+                batch_review::dispatch_review_for_project(&project_dir, batch.as_deref())?;
+            println!("已委派批次代码审查：{task_id}");
         }
     }
     Ok(())

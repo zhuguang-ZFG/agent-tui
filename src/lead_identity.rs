@@ -76,7 +76,7 @@ Playbook（人类可读）：`{playbook_s}`
 | `【用户任务】` / 用户描述需求 | 分析 → 输出 **agent-plan** |
 | `【回执·task·done】` / done 回执 | review → 续派（审查/下一波/合并准备） |
 | `【回执·task·awaiting_review】` | TUI 已自动派 `{{task}}-review`；等 mimo done |
-| `【merge-ready】` | 全部子任务 review 通过 → `agent-tui pr-create` 或 agents-complete merge |
+| `【merge-ready】` | 全部子任务 + 批次审查通过 → `agent-tui pr-create` 或 agents-complete merge |
 | `【回执·task·failed】` | 输出修复或改派 plan |
 | `【回执·task·blocked】` | 决策：补信息 / 拆 task / 改 scope |
 | `[agent-tui·续派]` 催促 | 立即输出 agent-plan |

@@ -28,6 +28,11 @@ pub fn is_review_task(task: &str) -> bool {
     task.ends_with(review_suffix()) && task.len() > review_suffix().len()
 }
 
+/// Batch plan review (`{prefix}-batch-review-{hash}`) — not a per-task review child.
+pub fn is_batch_review_task(task: &str) -> bool {
+    task.contains("-batch-review-")
+}
+
 pub fn review_task_id(task: &str) -> String {
     format!("{task}{}", review_suffix())
 }
@@ -85,7 +90,7 @@ pub fn apply_implementation_done(
     task: &str,
     summary: &str,
 ) -> ReviewGateOutcome {
-    if !review_gate_enabled() || is_review_task(task) {
+    if !review_gate_enabled() || is_review_task(task) || is_batch_review_task(task) {
         return ReviewGateOutcome {
             status: "done".into(),
             summary: summary.to_string(),

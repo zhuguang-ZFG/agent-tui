@@ -194,9 +194,22 @@ Lead 应输出下一波 plan（review / 修复 / 续派），**勿等用户**。
 | Web | `agent-tui serve` 或 `AGENT_TUI_OBSERVER=1` |
 | CLI | `tasks` / `events` / `memory-search` |
 
-### 阶段 I：合并（agents-complete）
+### 阶段 I：审查与合并就绪
 
-多 Agent worktree 改完后，用 agents-complete 的 `merge.sh` / `agentctl merge` 合成一个 PR（超出 agent-tui 范围，见 solid-guacamole 文档）。
+1. **逐 task review 硬门禁**（`AGENT_TUI_REVIEW_GATE=1`）：工人 `done` → `awaiting_review` → 自动派 `{task}-review` → 通过后父任务才 `done`
+2. **批次代码审查**（`AGENT_TUI_BATCH_REVIEW=1`）：全部子任务 `done` 后自动派 `{batch}-batch-review-{hash}` 给 reviewer；通过后才发 `【merge-ready】`
+3. **merge-ready**：通知 Lead → `agent-tui pr-create` 或 agents-complete merge
+4. **运行时进化**：`delegation_outcomes.jsonl` → `agent-tui evolve` → STRENGTHS 历史表现
+
+```powershell
+agent-tui review --batch rgate --project-dir D:\proj   # 手动触发批次审查
+agent-tui pr-create --project-dir D:\proj
+agent-tui evolve --project-dir D:\proj
+```
+
+### 阶段 J：合并（agents-complete / gh）
+
+多 Agent worktree 改完后，用 agents-complete 的 `merge.sh` / `agentctl merge` 或 `agent-tui pr-create` 合成 PR。
 
 ---
 
@@ -386,6 +399,11 @@ agent-tui verify-live --project-dir D:\proj
 | `AGENT_TUI_REPORT_GATE` | 1 | 回执前跑验证命令 |
 | `AGENT_TUI_VERIFY_CMD` | — | 全局门禁命令 |
 | `AGENT_TUI_VERIFY_{TASK}` | — | 单任务门禁 |
+| `AGENT_TUI_REVIEW_GATE` | 1 | 实现 task done 需 review 通过 |
+| `AGENT_TUI_BATCH_REVIEW` | 1 | merge-ready 前批次代码审查 |
+| `AGENT_TUI_MERGE_READY` | 1 | 全部 done 后通知 Lead |
+| `AGENT_TUI_MERGE_BATCH` | — | 仅统计/审查前缀匹配的 task |
+| `AGENT_TUI_EVOLUTION` | 1 | 委派结果统计写回 STRENGTHS |
 | `AGENT_TUI_OBSERVER` | 0 | TUI 附带 Web 面板 |
 | `AGENT_TUI_OBSERVER_PORT` | 8787 | Web 端口 |
 | `AGENT_TUI_OBSERVER_SSE_MS` | 2000 | SSE 推送间隔 |
@@ -412,6 +430,11 @@ agent-tui verify-live --project-dir D:\proj
 | `memory_fts.rs` | FTS5 检索 |
 | `observer.rs` | Web 面板 + SSE |
 | `verify_loop.rs` | 无 TUI 闭环测试 |
+| `review_gate.rs` | 逐 task review 硬门禁 |
+| `batch_review.rs` | 计划完成后批次代码审查 |
+| `merge_ready.rs` | merge-ready 状态机 |
+| `delegation_stats.rs` | 委派进化 / STRENGTHS 历史 |
+| `agent_strengths.rs` | 优势委派与错配提示 |
 | `health.rs` | PTY 健康监测与自动重启 |
 
 ---

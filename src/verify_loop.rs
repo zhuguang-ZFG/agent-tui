@@ -969,11 +969,25 @@ pub fn verify_review_merge_chain() -> Result<()> {
         other => bail!("review gate: parent expected done after review, got {other:?}"),
     }
 
-    let events = meta::load_coord_events(&dir);
-    if !events
-        .iter()
-        .any(|e| e.message.contains("merge-ready") || e.message.contains("【merge-ready】"))
+    let batch_id = crate::batch_review::batch_review_task_id(&[task.clone()]);
+    match task_state::load_snapshots(&dir)
+        .get(&batch_id)
+        .map(|s| s.status.as_str())
     {
+        Some("delegated") => {}
+        other => bail!("batch review: expected delegated, got {other:?}"),
+    }
+
+    let pre_events = meta::load_coord_events(&dir);
+    if pre_events.iter().any(|e| e.message.contains("【merge-ready】")) {
+        bail!("merge-ready should wait for batch review");
+    }
+
+    delegation::report_task_auto(&dir, "mimo", &lead, &batch_id, "done", "batch LGTM")?;
+    let _ = merge_ready::notify_lead_if_ready(&dir, &lead)?;
+
+    let events = meta::load_coord_events(&dir);
+    if !events.iter().any(|e| e.message.contains("【merge-ready】")) {
         bail!("merge-ready: missing notify to lead");
     }
 
@@ -1035,7 +1049,7 @@ pub fn run_all(project_dir: &Path) -> Result<()> {
     println!("  strength delegate: UI→codex 错配提示 ✓");
     println!("  relay persist: relay_cursor.json 重启恢复 ✓");
     println!("  blocked: max nudges → advisor 自动升级 ✓");
-    println!("  review gate: done → task-review → merge-ready ✓");
+    println!("  review gate: done → task-review → batch-review → merge-ready ✓");
     println!("  evolution: outcomes → STRENGTHS 历史表现 ✓");
     println!("  init scaffold: 任意目录 agent-tui init ✓");
     println!("  relay: PTY 未就绪时不推进游标 ✓");

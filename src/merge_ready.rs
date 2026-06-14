@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::meta;
-use crate::review_gate::is_review_task;
+use crate::review_gate::{is_batch_review_task, is_review_task};
 use crate::task_state;
 use crate::terminal;
 
@@ -50,7 +50,7 @@ pub fn evaluate(project_dir: &Path) -> MergeReadyStatus {
 
     let mut impl_tasks: BTreeSet<String> = BTreeSet::new();
     for (task, s) in &snap {
-        if is_review_task(task) || task.ends_with("-unblock") {
+        if is_review_task(task) || is_batch_review_task(task) || task.ends_with("-unblock") {
             continue;
         }
         if let Some(ref prefix) = batch {
@@ -129,6 +129,30 @@ pub fn notify_lead_if_ready(project_dir: &Path, lead: &str) -> Result<bool> {
     let fp = batch_fingerprint(&status.done_tasks);
     if already_notified(project_dir, &fp) {
         return Ok(false);
+    }
+
+    let batch_task = crate::batch_review::batch_review_task_id(&status.done_tasks);
+    if crate::batch_review::batch_review_enabled() {
+        if crate::batch_review::dispatch_batch_review(project_dir, lead, &status.done_tasks)? {
+            terminal::log_message(
+                project_dir,
+                "info",
+                &format!("merge-ready: 等待批次审查 {batch_task} 完成"),
+            );
+            return Ok(false);
+        }
+        if !crate::batch_review::batch_review_passed(project_dir, &batch_task) {
+            let st = crate::batch_review::batch_review_status(project_dir, &batch_task)
+                .unwrap_or_else(|| "missing".into());
+            if st == "failed" {
+                let body = format!(
+                    "【batch-review·failed】批次审查未通过（{batch_task}）。\
+                     ▶ Lead 行动：输出 agent-plan 派发修复 task，修复后 `agent-tui review` 重审。"
+                );
+                meta::notify_agent_from(project_dir, lead, &body, "agent-tui")?;
+            }
+            return Ok(false);
+        }
     }
 
     let task_list = status.done_tasks.join(", ");
