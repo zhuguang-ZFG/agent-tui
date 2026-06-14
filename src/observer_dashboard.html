@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>agent-tui observer</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --panel: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --ok: #3fb950;
+      --warn: #d29922;
+      --err: #f85149;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1.5rem;
+      align-items: baseline;
+    }
+    header h1 { margin: 0; font-size: 1.1rem; font-weight: 600; }
+    header .meta { color: var(--muted); font-size: 0.85rem; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 1rem;
+      padding: 1rem;
+    }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    section h2 {
+      margin: 0;
+      padding: 0.6rem 0.85rem;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+    .body { padding: 0.65rem 0.85rem; max-height: 280px; overflow: auto; font-size: 0.82rem; }
+    .body.wide { max-height: 420px; font-family: ui-monospace, Consolas, monospace; white-space: pre-wrap; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    th, td { text-align: left; padding: 0.35rem 0.4rem; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; }
+    .pill {
+      display: inline-block;
+      padding: 0.1rem 0.45rem;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 600;
+    }
+    .done { background: #23863633; color: var(--ok); }
+    .failed { background: #da363333; color: var(--err); }
+    .blocked { background: #9e6a0333; color: var(--warn); }
+    .delegated { background: #388bfd33; color: var(--accent); }
+    .pending { background: #484f5833; color: var(--muted); }
+    .empty { color: var(--muted); font-style: italic; }
+    #err { color: var(--err); padding: 1rem; display: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>agent-tui observer</h1>
+    <span class="meta" id="lead">—</span>
+    <span class="meta" id="updated">—</span>
+    <span class="meta" id="project">—</span>
+  </header>
+  <div id="err"></div>
+  <div class="grid">
+    <section><h2>Agents</h2><div class="body" id="agents"></div></section>
+    <section><h2>Tasks</h2><div class="body" id="tasks"></div></section>
+    <section><h2>Retry queue</h2><div class="body" id="retry"></div></section>
+    <section><h2>Dead letters</h2><div class="body" id="dead"></div></section>
+    <section style="grid-column: 1 / -1"><h2>Timeline</h2><div class="body wide" id="timeline"></div></section>
+  </div>
+  <script>
+    function pill(status) {
+      const c = ['done','failed','blocked','delegated','pending'].includes(status) ? status : 'pending';
+      return `<span class="pill ${c}">${status}</span>`;
+    }
+    function esc(s) {
+      return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+    function renderAgents(list) {
+      if (!list.length) return '<p class="empty">(无)</p>';
+      return '<table><tr><th>Agent</th><th>Role</th><th>Tasks</th></tr>' +
+        list.map(a => `<tr><td>${esc(a.name)}</td><td>${esc(a.role)}</td><td>${esc((a.active_tasks||[]).join(', ') || '—')}</td></tr>`).join('') +
+        '</table>';
+    }
+    function renderTasks(list) {
+      if (!list.length) return '<p class="empty">(无)</p>';
+      return '<table><tr><th>Task</th><th>Status</th><th>Worker</th></tr>' +
+        list.slice(0, 24).map(t => `<tr><td>${esc(t.task)}</td><td>${pill(t.status)}</td><td>${esc(t.worker||'—')}</td></tr>`).join('') +
+        '</table>';
+    }
+    function renderRetry(list) {
+      if (!list.length) return '<p class="empty">(无)</p>';
+      return list.map(r => `<div>${esc(r.task)} → ${esc(r.worker)} #${r.attempt}${r.previous_worker ? ' (原 '+esc(r.previous_worker)+')' : ''}</div>`).join('');
+    }
+    function renderDead(list) {
+      if (!list.length) return '<p class="empty">(无)</p>';
+      return list.map(r => `<div>${pill(r.status)} ${esc(r.worker)} / ${esc(r.task)} attempt=${r.attempt}</div>`).join('');
+    }
+    function applySnapshot(s) {
+      document.getElementById('err').style.display = 'none';
+      document.getElementById('lead').textContent = 'Lead: ' + s.lead;
+      document.getElementById('updated').textContent = 'Updated: ' + (s.generated_at || '').slice(11, 19);
+      document.getElementById('project').textContent = s.project_dir;
+      document.getElementById('agents').innerHTML = renderAgents(s.agents || []);
+      document.getElementById('tasks').innerHTML = renderTasks(s.tasks || []);
+      document.getElementById('retry').innerHTML = renderRetry(s.retry_queue || []);
+      document.getElementById('dead').innerHTML = renderDead(s.dead_letters || []);
+      document.getElementById('timeline').textContent = (s.timeline || []).join('\n') || '(暂无)';
+    }
+    async function refresh() {
+      try {
+        const res = await fetch('/api/snapshot');
+        if (!res.ok) throw new Error(res.statusText);
+        applySnapshot(await res.json());
+      } catch (e) {
+        const el = document.getElementById('err');
+        el.style.display = 'block';
+        el.textContent = '加载失败: ' + e.message;
+      }
+    }
+    if (typeof EventSource !== 'undefined') {
+      const es = new EventSource('/api/stream');
+      es.addEventListener('snapshot', (ev) => {
+        try { applySnapshot(JSON.parse(ev.data)); } catch (_) { refresh(); }
+      });
+      es.onerror = () => { es.close(); refresh(); setInterval(refresh, 3000); };
+    } else {
+      refresh();
+      setInterval(refresh, 3000);
+    }
+  </script>
+</body>
+</html>

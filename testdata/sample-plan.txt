@@ -1,0 +1,4 @@
+计划如下：
+```agent-plan
+[{"worker":"codex","task":"debug-plan-001","description":"echo test"}]
+```
