@@ -114,9 +114,9 @@ pub fn report_task_auto(
         summary
     };
     let body = format!(
-        "【回执·{task}·{status}】{summary}（TUI 自动采集）\
-         主 Agent：请立即输出下一波 agent-plan（review/修复/续派），勿等用户。\
-         规则：.cursor/rules/agent-tui-orchestrator.mdc 或 AGENT_TUI_COORD_DOC"
+        "【回执·{task}·{status}】{reporter} 完成。{summary}（TUI 自动采集）\
+         ▶ Lead 行动：立即输出 ```agent-plan```（review {task} / 续派 / 修复），禁止询问用户是否继续。\
+         规则：.cursor/rules/agent-tui-orchestrator.mdc"
     );
     meta::notify_agent_from(project_dir, lead, &body, reporter)?;
     meta::append_shared_line(

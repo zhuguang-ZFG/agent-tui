@@ -11,6 +11,7 @@ mod events_ui;
 mod health;
 mod inbox_ui;
 mod lead_followup;
+mod lead_identity;
 mod lead_watch;
 mod mailbox;
 mod mailbox_relay;
@@ -169,6 +170,11 @@ enum Commands {
         port: u16,
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
+    /// 刷新 Lead 规则（LEAD.md + Cursor orchestrator.mdc + AGENTS 指针）
+    SyncLead {
         #[arg(long)]
         project_dir: Option<PathBuf>,
     },
@@ -478,6 +484,25 @@ fn run_command(cmd: Commands) -> Result<()> {
             let project_dir = config::resolve_project_dir(project_dir)?;
             let addr = format!("{bind}:{port}");
             observer::serve_blocking(project_dir, &addr)?;
+        }
+        Commands::SyncLead { project_dir } => {
+            let project_dir = config::resolve_project_dir(project_dir)?;
+            let agents = config::load_agents(&project_dir)?;
+            let lead = config::resolve_lead_agent(&agents);
+            let spec = agents
+                .iter()
+                .find(|a| a.name.eq_ignore_ascii_case(&lead))
+                .context("lead agent not in agents.yaml")?;
+            lead_identity::sync_lead_context(&project_dir, &lead, &spec.worktree)?;
+            let _ = agent_memory::refresh_lead_identity(&project_dir, &lead);
+            println!(
+                "已同步 Lead 身份规则 → {}",
+                spec.worktree.join(".cursor/rules/agent-tui-orchestrator.mdc").display()
+            );
+            println!(
+                "Playbook → {}",
+                project_dir.join(".agents/LEAD.md").display()
+            );
         }
     }
     Ok(())

@@ -75,8 +75,11 @@ fn memory_template(agent: &str, role: &str, lead: &str, project_dir: &Path) -> S
     let is_lead = agent.eq_ignore_ascii_case(lead);
     let lead_block = if is_lead {
         format!(
-            "- 你是 **主 Agent**：用户任务 → 输出 `agent-plan` → 收到回执后续派\n\
-             - 规则文件：worktree `.cursor/rules/agent-tui-orchestrator.mdc`\n"
+            "- **你是唯一 Lead（Orchestrator）**：想、拆、派、验、续 — 不是普通码农\n\
+             - 输出 `agent-plan` = 下命令；TUI 自动 delegate 给工人\n\
+             - 收到 `【回执·…】` → **同一轮**内续派 agent-plan，**禁止**问用户是否继续\n\
+             - 必读：worktree `.cursor/rules/agent-tui-orchestrator.mdc` + `.agents/LEAD.md`\n\
+             - Playbook 环境变量：`AGENT_TUI_LEAD_PLAYBOOK`\n"
         )
     } else {
         String::from(
@@ -155,10 +158,12 @@ fn next_action_hint(agent: &str, role: &str, lead: &str, kind: MemoryEventKind) 
             "执行委派任务；完成后输出 agent-report 代码块。".into()
         }
         MemoryEventKind::Report if is_lead => {
-            "根据回执验收，输出下一波 agent-plan 或宣布阶段完成。".into()
+            "收到回执：立即输出 agent-plan（review/续派/修复），勿问用户。".into()
         }
         MemoryEventKind::Report => "等待下一委派或协调消息。".into(),
-        MemoryEventKind::Briefing if is_lead => "按 COORDINATION.md 担任主 Agent 协调。".into(),
+        MemoryEventKind::Briefing if is_lead => {
+            "Lead 身份已确认：读 orchestrator.mdc + LEAD.md；统筹闭环。".into()
+        }
         _ => format!("以 {role} 身份响应 inbox / 协调注入。"),
     }
 }
@@ -532,6 +537,44 @@ pub fn on_report(
         Some((task, status, reporter)),
     )?;
     Ok(())
+}
+
+/// Refresh Lead ## Rules in MEMORY.md after briefing / identity sync.
+pub fn refresh_lead_identity(project_dir: &Path, lead: &str) -> Result<()> {
+    let path = memory_md_path(project_dir, lead);
+    if !path.is_file() {
+        return Ok(());
+    }
+    let role = agent_role(project_dir, lead);
+    let fresh = memory_template(lead, &role, lead, project_dir);
+    let fresh_rules = extract_section(&fresh, "## Rules", "## Active assignments");
+    let mut content = fs::read_to_string(&path).with_context(|| path.display().to_string())?;
+    if let Some(replaced) = replace_section(
+        &content,
+        "## Rules",
+        "## Active assignments",
+        &fresh_rules,
+    ) {
+        content = replaced;
+        fs::write(&path, content).with_context(|| path.display().to_string())?;
+    }
+    Ok(())
+}
+
+fn extract_section(text: &str, begin: &str, end: &str) -> String {
+    let start = text.find(begin).unwrap_or(0);
+    let rest = &text[start..];
+    let end_off = rest.find(end).unwrap_or(rest.len());
+    rest[..end_off].trim_end().to_string() + "\n\n"
+}
+
+fn replace_section(text: &str, begin: &str, end: &str, new_body: &str) -> Option<String> {
+    let start = text.find(begin)?;
+    let rest = &text[start..];
+    let end_off = rest.find(end)?;
+    let before = &text[..start];
+    let after = &rest[end_off..];
+    Some(format!("{before}{new_body}{after}"))
 }
 
 #[cfg(test)]

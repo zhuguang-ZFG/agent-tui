@@ -489,7 +489,21 @@ merge.sh         ───►    多 Agent 改动 → 单 PR（TUI 不管合并�
 
 ---
 
-## 14. 参考链接
+## 14. Lead 身份固化（Cursor）
+
+TUI 启动 / Lead pane 重启时自动：
+
+1. 写入 `.agents/LEAD.md`（Playbook）
+2. 同步 worktree `.cursor/rules/agent-tui-orchestrator.mdc`（`alwaysApply: true`）
+3. 更新 `AGENTS-agent-tui.md`，并在 `AGENTS.md` 插入 Lead 指针
+4. PTY 注入 briefing + 更新 cursor `MEMORY.md` Rules 段
+5. 注入环境变量 `AGENT_TUI_ORCHESTRATOR=1`、`AGENT_TUI_LEAD_PLAYBOOK`
+
+实现见 `src/lead_identity.rs`。
+
+---
+
+## 15. 参考链接
 
 - 本仓库 README：[../README.md](../README.md)
 - agents-complete / solid-guacamole：https://github.com/zhuguang-ZFG/solid-guacamole

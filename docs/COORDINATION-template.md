@@ -2,6 +2,16 @@
 
 > 复制到目标项目的 `.agents/COORDINATION.md`。TUI 启动时会设置 `AGENT_TUI_COORD_DOC` 指向该文件，并同步 Lead 的 IDE 规则。
 
+## Lead 定位（主 Agent 必读）
+
+**你是唯一 Lead（Orchestrator），不是普通工人。**
+
+- Playbook：`.agents/LEAD.md`（TUI 自动同步）
+- Cursor 规则：worktree `.cursor/rules/agent-tui-orchestrator.mdc`（`alwaysApply`）
+- 环境变量：`AGENT_TUI_ORCHESTRATOR=1`、`AGENT_TUI_LEAD_PLAYBOOK`
+
+收到工人回执 → **立即** 输出 agent-plan，**禁止** 问用户是否继续。
+
 ## 环境变量（TUI 注入）
 
 | 变量 | 含义 |
@@ -13,6 +23,7 @@
 | `AGENT_TUI_PROJECT` | 项目根 |
 | `AGENT_TUI_COORD_DOC` | 本文件绝对路径 |
 | `AGENT_TUI_ORCHESTRATOR=1` | 仅 Lead |
+| `AGENT_TUI_LEAD_PLAYBOOK` | Lead 手册（`.agents/LEAD.md`） |
 
 ## Lead 职责
 

@@ -392,7 +392,7 @@ fn coord_doc_path(project_dir: &Path) -> String {
 /// Single-line PTY inject (no fenced code — avoids shell/CLI parsing issues).
 pub fn briefing_pty_line(lead: &str, coord_doc: &str) -> String {
     format!(
-        "[agent-tui] 你是主 Agent ({lead})。按 {coord_doc} 协调：用户任务后输出 agent-plan JSON 块；收到工人回执后继续 agent-plan，勿等用户。"
+        "[agent-tui·Lead] 你是主 Agent ({lead})，身份=Orchestrator 非码农。收到【回执·…】→立刻 agent-plan，勿问用户。规则: .cursor/rules/agent-tui-orchestrator.mdc | {coord_doc}"
     )
 }
 
@@ -416,18 +416,19 @@ fn inject_refresh_to_pane(pane: &AgentPane, lead: &str, coord_doc: &str, reason:
 
 fn initial_briefing_message(lead: &str, coord_doc: &str) -> String {
     format!(
-        "【协调规则·agent-tui】你在 Windows 多 Agent TUI 中运行（AGENT_TUI=1），角色=主 Agent ({lead})。\
-         闭环：用户任务→你输出 agent-plan→TUI 自动派发→工人 agent-report→TUI 自动回传→你输出下一波 agent-plan。\
-         计划格式：```agent-plan [{{\"worker\":\"codex\",\"task\":\"auth-api\",\"description\":\"…\"}}] ``` \
-         团队：codex=后端 kimi=前端 mimo=审查 claude=顾问。收到【回执·…】后自动续派，勿等用户。\
-         完整规则：{coord_doc}"
+        "【协调规则·Lead 身份】你在 agent-tui 五宫格中任 **唯一 Lead（{lead}）**，`AGENT_TUI_ORCHESTRATOR=1`。\
+         定位：统筹者 — 你拆任务、输出 agent-plan；TUI 自动 delegate；工人 agent-report 回传；你**立即续派**，勿等用户。\
+         工人：codex=后端 kimi=前端 mimo=审查 claude=顾问；勿委派给自己。\
+         必读：worktree `.cursor/rules/agent-tui-orchestrator.mdc` + `.agents/LEAD.md`。\
+         闭环：用户任务→agent-plan→自动派发→agent-report→续派 agent-plan。\
+         完整协议：{coord_doc}"
     )
 }
 
 fn refresh_briefing_message(lead: &str, coord_doc: &str, reason: &str) -> String {
     format!(
-        "【协调规则·刷新·{reason}】你仍是主 Agent ({lead})。闭环不变：用户任务→agent-plan→自动派发→agent-report 回传→续派 agent-plan，勿等用户。\
-         规则文件：.cursor/rules/agent-tui-orchestrator.mdc；完整：{coord_doc}"
+        "【Lead 提醒·{reason}】你仍是 **唯一 Lead（{lead}）**。收到工人回执 → 同一轮内输出 agent-plan（review/续派/修复），禁止问用户是否继续。\
+         规则：agent-tui-orchestrator.mdc + LEAD.md。协议：{coord_doc}"
     )
 }
 
@@ -617,6 +618,7 @@ pub fn maybe_send_briefing(
     }
 
     deliver_initial_briefing(project_dir, lead, state, lead_pane)?;
+    let _ = crate::agent_memory::refresh_lead_identity(project_dir, lead);
     let _ = agent_memory::record_event(
         project_dir,
         lead,

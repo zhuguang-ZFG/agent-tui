@@ -248,73 +248,19 @@ pub fn apply_agent_tui_env(
     );
     if agent_name.eq_ignore_ascii_case(lead_agent) {
         cmd.env("AGENT_TUI_ORCHESTRATOR", "1");
+        cmd.env(
+            "AGENT_TUI_LEAD_PLAYBOOK",
+            normalize_windows_path(project_dir.join(".agents/LEAD.md"))
+                .to_string_lossy()
+                .to_string(),
+        );
     }
 }
 
 /// Install Cursor rules + AGENTS stub so the lead CLI loads orchestration context from cwd.
 pub fn sync_lead_coordination_rules(project_dir: &Path, worktree: &Path) -> Result<()> {
-    let coord = normalize_windows_path(project_dir.join(".agents/COORDINATION.md"));
-    let coord_s = coord.to_string_lossy();
-    let rules_dir = worktree.join(".cursor/rules");
-    fs::create_dir_all(&rules_dir).with_context(|| format!("mkdir {}", rules_dir.display()))?;
-
-    let rules_body = format!(
-        r#"---
-description: agent-tui multi-agent orchestrator (auto-installed)
-alwaysApply: true
----
-
-# agent-tui 主 Agent（协调者）
-
-你在 Windows **agent-tui** 五宫格 TUI 中担任 **主 Agent**。环境变量 `AGENT_TUI_ORCHESTRATOR=1`。
-
-## 闭环（全自动，勿等用户确认）
-
-1. 用户通过 `!任务` 或留言板提交需求
-2. 你拆解并输出 **agent-plan** 代码块 → TUI 自动派发给工人
-   - **推荐**：同时写入 `.agents/shared/plan_inbox.jsonl`（更可靠，见 COORDINATION.md）
-3. 工人输出 **agent-report** → TUI 自动回传给你
-4. 你输出下一波 **agent-plan**（验收 / 修复 / 续派）
-
-## agent-plan 格式（PTY + 可选文件双通道）
-
-终端输出：
-```agent-plan
-[{{"worker":"codex","task":"auth-api","description":"实现登录 API","depends_on":[]}}]
-```
-
-或追加一行到 `../../.agents/shared/plan_inbox.jsonl`（相对 worktree）：
-```json
-{{"lead":"cursor","worker":"codex","task":"auth-api","description":"实现登录 API","depends_on":[]}}
-```
-（TUI 每 tick 扫描 plan_inbox，与 transcript 互为备份）
-
-工人：codex=后端，kimi=前端，mimo=审查，claude=顾问。不要委派给自己。
-
-## agent-report（工人用；主 Agent 收到回执后处理）
-
-收到 `[协调/…->cursor]` 或 inbox 中的 `【回执·…】` 后必须续派。
-
-## 完整规则
-
-读取：`{coord_s}`
-
-私有 inbox：`../../.agents/{{AGENT_TUI_AGENT}}/memory/inbox.md`（相对 worktree）
-"#
-    );
-    let rules_path = rules_dir.join("agent-tui-orchestrator.mdc");
-    fs::write(&rules_path, rules_body).with_context(|| format!("write {}", rules_path.display()))?;
-
-    let agents_stub = worktree.join("AGENTS-agent-tui.md");
-    if !agents_stub.exists() {
-        let stub = format!(
-            "# agent-tui orchestrator\n\n\
-             主 Agent 协调规则见 `.cursor/rules/agent-tui-orchestrator.mdc`。\n\
-             完整文档：`{coord_s}`\n"
-        );
-        fs::write(&agents_stub, stub).with_context(|| format!("write {}", agents_stub.display()))?;
-    }
-    Ok(())
+    let lead = resolve_lead_agent(&load_agents(project_dir)?);
+    crate::lead_identity::sync_lead_context(project_dir, &lead, worktree)
 }
 
 #[cfg(windows)]
