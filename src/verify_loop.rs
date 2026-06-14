@@ -15,10 +15,13 @@ use crate::lead_followup;
 use crate::lead_identity;
 use crate::lead_watch;
 use crate::mailbox;
+use crate::merge_ready;
 use crate::meta;
 use crate::observer;
 use crate::report_watch;
+use crate::project_init::{self, InitOptions};
 use crate::relay::{self, RelayState};
+use crate::review_gate;
 use crate::task_dag;
 use crate::task_state;
 
@@ -50,6 +53,13 @@ pub fn unique_task(prefix: &str) -> String {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     format!("{prefix}-{ms}")
+}
+
+fn without_review_gate<T, F: FnOnce() -> Result<T>>(f: F) -> Result<T> {
+    std::env::set_var("AGENT_TUI_REVIEW_GATE", "0");
+    let out = f();
+    std::env::remove_var("AGENT_TUI_REVIEW_GATE");
+    out
 }
 
 /// Parse-only checks (no filesystem writes).
@@ -863,19 +873,90 @@ pub fn verify_blocked_escalation(project_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Implementation done → auto review → parent done → merge-ready notify.
+pub fn verify_review_merge_chain() -> Result<()> {
+    let dir = std::env::temp_dir().join(format!("review-merge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    project_init::init_project(
+        &dir,
+        &InitOptions {
+            force: true,
+            link_worktrees: false,
+            sync_lead: false,
+            minimal: false,
+        },
+    )?;
+    let agents = load_agents(&dir)?;
+    let lead = resolve_lead_agent(&agents);
+    if !agents.iter().any(|a| a.name == "mimo") {
+        bail!("review merge verify: need mimo reviewer");
+    }
+
+    std::env::set_var("AGENT_TUI_MERGE_BATCH", "rgate");
+    std::env::remove_var("AGENT_TUI_REVIEW_GATE");
+    let _ = merge_ready::reset_notified(&dir);
+
+    let task = unique_task("rgate");
+    delegation::delegate_task(&dir, &lead, "codex", &task, "review gate 验证")?;
+    delegation::report_task_auto(&dir, "codex", &lead, &task, "done", "实现完成")?;
+
+    match task_state::load_snapshots(&dir)
+        .get(&task)
+        .map(|s| s.status.as_str())
+    {
+        Some("awaiting_review") => {}
+        other => bail!("review gate: expected awaiting_review, got {other:?}"),
+    }
+
+    let review_id = review_gate::review_task_id(&task);
+    match task_state::load_snapshots(&dir)
+        .get(&review_id)
+        .map(|s| s.status.as_str())
+    {
+        Some("delegated") => {}
+        other => bail!("review gate: expected review delegated, got {other:?}"),
+    }
+
+    delegation::report_task_auto(&dir, "mimo", &lead, &review_id, "done", "LGTM")?;
+
+    match task_state::load_snapshots(&dir)
+        .get(&task)
+        .map(|s| s.status.as_str())
+    {
+        Some("done") => {}
+        other => bail!("review gate: parent expected done after review, got {other:?}"),
+    }
+
+    let events = meta::load_coord_events(&dir);
+    if !events
+        .iter()
+        .any(|e| e.message.contains("merge-ready") || e.message.contains("【merge-ready】"))
+    {
+        bail!("merge-ready: missing notify to lead");
+    }
+
+    std::env::remove_var("AGENT_TUI_MERGE_BATCH");
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
 pub fn run_all(project_dir: &Path) -> Result<()> {
     verify_parsers().context("parser checks")?;
     verify_relay_cursor_hold().context("relay cursor hold")?;
     verify_persistent_plan_dedupe(project_dir).context("persistent plan dedupe")?;
-    let outcome = verify_events_chain(project_dir).context("events chain")?;
-    let retry_outcome = verify_failed_retry_chain(project_dir).context("failed→retry chain")?;
-    let dag_outcome = verify_dag_chain(project_dir).context("DAG chain")?;
-    verify_lead_followup_chain(project_dir).context("lead followup chain")?;
-    verify_lead_transcript_followup_chain(project_dir).context("lead transcript followup")?;
-    verify_dag_cycle_rejected(project_dir).context("DAG cycle rejection")?;
+    let outcome = without_review_gate(|| verify_events_chain(project_dir)).context("events chain")?;
+    let retry_outcome =
+        without_review_gate(|| verify_failed_retry_chain(project_dir)).context("failed→retry chain")?;
+    let dag_outcome = without_review_gate(|| verify_dag_chain(project_dir)).context("DAG chain")?;
+    without_review_gate(|| verify_lead_followup_chain(project_dir)).context("lead followup chain")?;
+    without_review_gate(|| verify_lead_transcript_followup_chain(project_dir))
+        .context("lead transcript followup")?;
+    without_review_gate(|| verify_dag_cycle_rejected(project_dir)).context("DAG cycle rejection")?;
     verify_lead_identity_sync(project_dir).context("lead identity sync")?;
     verify_relay_cursor_persist(project_dir).context("relay cursor persist")?;
     verify_blocked_escalation(project_dir).context("blocked advisor escalate")?;
+    verify_review_merge_chain().context("review gate + merge-ready")?;
     crate::project_init::verify_init_scaffold().context("init scaffold")?;
     observer::verify_http_snapshot(project_dir).context("observer HTTP")?;
     observer::verify_sse_stream(project_dir).context("observer SSE")?;
@@ -911,6 +992,7 @@ pub fn run_all(project_dir: &Path) -> Result<()> {
     println!("  lead identity: sync-lead + orchestrator.mdc + LEAD.md ✓");
     println!("  relay persist: relay_cursor.json 重启恢复 ✓");
     println!("  blocked: max nudges → advisor 自动升级 ✓");
+    println!("  review gate: done → task-review → merge-ready ✓");
     println!("  init scaffold: 任意目录 agent-tui init ✓");
     println!("  relay: PTY 未就绪时不推进游标 ✓");
     println!("  dedupe: plan 指纹重启后仍有效 ✓");

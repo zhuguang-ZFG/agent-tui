@@ -6,6 +6,7 @@ use crate::claims;
 use crate::config;
 use crate::meta::{self, validate_task_name};
 use crate::report_gate;
+use crate::review_gate;
 use crate::task_dag;
 use crate::terminal;
 
@@ -102,16 +103,67 @@ pub fn report_task_auto(
     }
     validate_task_name(task)?;
     let gate = report_gate::apply_report_gate(project_dir, reporter, task, status, summary)?;
-    let status = gate.status.as_str();
-    let summary = gate.summary.trim();
-    let summary = if summary.is_empty() {
-        match status {
-            "blocked" => "任务受阻，需要主 Agent 决策",
-            "failed" => "任务失败",
-            _ => "已完成",
+    let mut status = gate.status;
+    let mut summary = gate.summary;
+
+    if status == "done" {
+        if review_gate::is_review_task(task) {
+            if let Some(parent) = review_gate::promote_parent_after_review(
+                project_dir,
+                lead,
+                reporter,
+                task,
+                "done",
+                &summary,
+            ) {
+                let _ = dispatch_pending_plans(project_dir, lead);
+                let _ = crate::merge_ready::notify_lead_if_ready(project_dir, lead);
+                let _ = parent;
+            }
+        } else {
+            let review = review_gate::apply_implementation_done(
+                project_dir,
+                lead,
+                reporter,
+                task,
+                &summary,
+            );
+            status = review.status;
+            summary = review.summary;
+            if let Some((reviewer, review_id, desc)) = review.delegate_review {
+                if delegate_task(project_dir, lead, &reviewer, &review_id, &desc).is_ok() {
+                    terminal::log_message(
+                        project_dir,
+                        "info",
+                        &format!("review gate: 已委派 {reviewer}/{review_id}"),
+                    );
+                }
+            }
         }
-    } else {
-        summary
+    } else if status == "failed" && review_gate::is_review_task(task) {
+        let _ = review_gate::promote_parent_after_review(
+            project_dir,
+            lead,
+            reporter,
+            task,
+            "failed",
+            &summary,
+        );
+    }
+
+    let status = status.as_str();
+    let summary = {
+        let s = summary.trim();
+        if s.is_empty() {
+            match status {
+                "blocked" => "任务受阻，需要主 Agent 决策".to_string(),
+                "failed" => "任务失败".to_string(),
+                "awaiting_review" => "待审查".to_string(),
+                _ => "已完成".to_string(),
+            }
+        } else {
+            s.to_string()
+        }
     };
     let body = format!(
         "【回执·{task}·{status}】{reporter} 完成。{summary}（TUI 自动采集）\
@@ -133,19 +185,21 @@ pub fn report_task_auto(
         .and_then(|s| s.summary.clone())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| summary.to_string());
-    let _ = crate::agent_memory::on_report(project_dir, reporter, lead, task, status, summary);
-    let _ = crate::task_state::on_report(project_dir, reporter, lead, task, status, summary);
-    let _ = crate::mailbox::report(project_dir, reporter, lead, task, status, summary);
+    let _ = crate::agent_memory::on_report(project_dir, reporter, lead, task, status, &summary);
+    let _ = crate::task_state::on_report(project_dir, reporter, lead, task, status, &summary);
+    let _ = crate::mailbox::report(project_dir, reporter, lead, task, status, &summary);
     let _ = crate::dead_letter::record_and_maybe_retry(
         project_dir,
         lead,
         reporter,
         task,
         status,
-        summary,
+        &summary,
         &desc,
     );
-    let _ = crate::lead_followup::on_worker_report(project_dir, reporter, task, status);
+    if status == "done" || status == "failed" || status == "blocked" {
+        let _ = crate::lead_followup::on_worker_report(project_dir, reporter, task, status);
+    }
     Ok(())
 }
 

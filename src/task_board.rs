@@ -23,7 +23,15 @@ pub fn format_task_board(project_dir: &Path) -> Result<String> {
         String::from("── 状态机（task_state） ──"),
     ];
     let mut any_state = false;
-    for status in ["delegated", "pending", "blocked", "failed", "done"] {
+    for status in [
+        "delegated",
+        "pending",
+        "awaiting_review",
+        "review_failed",
+        "blocked",
+        "failed",
+        "done",
+    ] {
         let group = task_state::tasks_by_status(&states, status);
         if group.is_empty() {
             continue;

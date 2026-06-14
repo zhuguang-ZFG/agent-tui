@@ -86,6 +86,8 @@ Playbook（人类可读）：`{playbook_s}`
 |--------------|------------|
 | `【用户任务】` / 用户描述需求 | 分析 → 输出 **agent-plan** |
 | `【回执·task·done】` / done 回执 | review → 续派（审查/下一波/合并准备） |
+| `【回执·task·awaiting_review】` | TUI 已自动派 `{{task}}-review`；等 mimo done |
+| `【merge-ready】` | 全部子任务 review 通过 → agents-complete merge / `gh pr create` |
 | `【回执·task·failed】` | 输出修复或改派 plan |
 | `【回执·task·blocked】` | 决策：补信息 / 拆 task / 改 scope |
 | `[agent-tui·续派]` 催促 | 立即输出 agent-plan |
@@ -162,7 +164,8 @@ fn lead_playbook_body(project_dir: &Path, lead: &str, agents: &[AgentSpec]) -> S
 1. 收到任务 → 5 分钟内输出首波 agent-plan（可并行多 worker）
 2. 收到 **done** 回执 → 同一轮对话内续派（review 或下一波）
 3. 收到 **failed/blocked** → 输出修复/决策 plan，勿甩给用户
-4. 合并前 → 委派 mimo review
+4. 合并前 → 委派 mimo review（TUI **硬门禁**：`{{task}}-review` done 后父任务才计 done）
+5. 收到 `【merge-ready】` → 执行 merge / 开 PR，勿问用户
 
 ## 文档
 

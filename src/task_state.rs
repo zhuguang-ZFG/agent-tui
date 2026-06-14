@@ -169,6 +169,8 @@ pub fn format_status_line(s: &TaskSnapshot) -> String {
         "done" => "✓",
         "failed" => "✗",
         "blocked" => "⏸",
+        "awaiting_review" => "👁",
+        "review_failed" => "⊘",
         "pending" => "⏳",
         "delegated" => "→",
         _ => "·",
