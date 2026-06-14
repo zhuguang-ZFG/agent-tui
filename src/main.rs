@@ -230,6 +230,9 @@ enum Commands {
         /// 仅审查 task 前缀匹配的批次（同 AGENT_TUI_MERGE_BATCH）
         #[arg(long)]
         batch: Option<String>,
+        /// 批次审查 failed 后清除 dispatched 指纹并重新委派
+        #[arg(long)]
+        force: bool,
         #[arg(long)]
         project_dir: Option<PathBuf>,
     },
@@ -625,8 +628,11 @@ fn run_command(cmd: Commands) -> Result<()> {
             let n = delegation_stats::evolve_project(&project_dir)?;
             println!("已更新 .agents/STRENGTHS.md 历史表现（{n} 条委派记录）");
         }
-        Commands::Review { batch, project_dir } => {
+        Commands::Review { batch, force, project_dir } => {
             let project_dir = config::resolve_project_dir(project_dir)?;
+            if force {
+                batch_review::reset_dispatched(&project_dir)?;
+            }
             let task_id =
                 batch_review::dispatch_review_for_project(&project_dir, batch.as_deref())?;
             println!("已委派批次代码审查：{task_id}");
