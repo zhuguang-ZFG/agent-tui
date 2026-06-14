@@ -210,6 +210,7 @@ pub fn record_and_maybe_retry(
                 attempt,
                 description,
                 task,
+                Some(project_dir),
             );
             if strength.eq_ignore_ascii_case(worker) {
                 pick_retry_worker(project_dir, lead, worker, attempt)

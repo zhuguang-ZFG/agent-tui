@@ -1,8 +1,10 @@
 //! Per-agent strength profiles — Lead delegates by capability, not round-robin.
 
 use std::fmt::Write as _;
+use std::path::Path;
 
 use crate::config::AgentSpec;
+use crate::delegation_stats;
 use crate::review_gate::is_review_task;
 
 #[derive(Debug, Clone)]
@@ -227,7 +229,13 @@ fn agent_bucket_scores(name: &str, role: &str) -> [i32; 5] {
 }
 
 /// Fit score for assigning `worker` to task+description (higher = better match).
-pub fn worker_fit_score(worker: &str, role: &str, task: &str, description: &str) -> i32 {
+pub fn worker_fit_score(
+    worker: &str,
+    role: &str,
+    task: &str,
+    description: &str,
+    project_dir: Option<&Path>,
+) -> i32 {
     if is_review_task(task) {
         return if worker.eq_ignore_ascii_case("mimo") || role == "reviewer" {
             100
@@ -245,6 +253,9 @@ pub fn worker_fit_score(worker: &str, role: &str, task: &str, description: &str)
     for i in 0..5 {
         total += buckets[i] * agent[i];
     }
+    if let Some(dir) = project_dir {
+        total += delegation_stats::history_bias(dir, worker, task, description);
+    }
     total
 }
 
@@ -253,6 +264,7 @@ pub fn suggest_worker<'a>(
     lead: &str,
     task: &str,
     description: &str,
+    project_dir: Option<&Path>,
 ) -> Option<&'a AgentSpec> {
     let mut best: Option<(&AgentSpec, i32)> = None;
     for a in agents {
@@ -265,7 +277,7 @@ pub fn suggest_worker<'a>(
             }
             continue;
         }
-        let score = worker_fit_score(&a.name, &a.role, task, description);
+        let score = worker_fit_score(&a.name, &a.role, task, description, project_dir);
         if score < 0 {
             continue;
         }
@@ -284,17 +296,20 @@ pub fn delegation_mismatch(
     worker: &str,
     task: &str,
     description: &str,
+    project_dir: Option<&Path>,
 ) -> Option<String> {
     if worker.eq_ignore_ascii_case(lead) {
         return Some("不能委派给 Lead 自己".into());
     }
     let assigned = agents.iter().find(|a| a.name.eq_ignore_ascii_case(worker))?;
-    let assigned_score = worker_fit_score(&assigned.name, &assigned.role, task, description);
-    let suggested = suggest_worker(agents, lead, task, description)?;
+    let assigned_score =
+        worker_fit_score(&assigned.name, &assigned.role, task, description, project_dir);
+    let suggested = suggest_worker(agents, lead, task, description, project_dir)?;
     if suggested.name.eq_ignore_ascii_case(worker) {
         return None;
     }
-    let suggested_score = worker_fit_score(&suggested.name, &suggested.role, task, description);
+    let suggested_score =
+        worker_fit_score(&suggested.name, &suggested.role, task, description, project_dir);
     if suggested_score.saturating_sub(assigned_score) < 12 {
         return None;
     }
@@ -401,14 +416,19 @@ pub fn format_briefing_strengths(agents: &[AgentSpec], lead: &str) -> String {
     )
 }
 
-pub fn strengths_doc_body(agents: &[AgentSpec], lead: &str) -> String {
+pub fn strengths_doc_body(agents: &[AgentSpec], lead: &str, project_dir: Option<&Path>) -> String {
+    let history = project_dir
+        .map(delegation_stats::format_history_section)
+        .unwrap_or_else(|| "## 历史表现（自动更新）\n\n> 工人回执后自动积累。\n".into());
     format!(
         "# Agent 能力表（agent-tui 自动维护）\n\n\
-         > Lead 委派时按 **最强项** 匹配任务，避免大材小用或错配。\n\n\
+         > Lead 委派时按 **最强项** + **历史成功率** 匹配任务。\n\n\
          {}\n\
+         {}\n\n\
          {}\n",
         format_roster_table(agents, lead),
-        format_delegation_guide(agents, lead)
+        format_delegation_guide(agents, lead),
+        history
     )
 }
 
@@ -420,6 +440,7 @@ pub fn pick_strength_retry_worker(
     attempt: u32,
     description: &str,
     task: &str,
+    project_dir: Option<&Path>,
 ) -> String {
     let pool: Vec<&AgentSpec> = agents
         .iter()
@@ -433,7 +454,7 @@ pub fn pick_strength_retry_worker(
         .map(|a| {
             (
                 *a,
-                worker_fit_score(&a.name, &a.role, task, description),
+                worker_fit_score(&a.name, &a.role, task, description, project_dir),
             )
         })
         .collect();
@@ -484,7 +505,7 @@ mod tests {
     #[test]
     fn suggest_frontend_for_ui() {
         let agents = specs();
-        let s = suggest_worker(&agents, "cursor", "login-ui", "React 登录页组件与 Tailwind 样式")
+        let s = suggest_worker(&agents, "cursor", "login-ui", "React 登录页组件与 Tailwind 样式", None)
             .unwrap();
         assert_eq!(s.name, "kimi");
     }
@@ -492,7 +513,7 @@ mod tests {
     #[test]
     fn suggest_codex_for_api() {
         let agents = specs();
-        let s = suggest_worker(&agents, "cursor", "auth-api", "Rust 后端登录 API 与 SQL")
+        let s = suggest_worker(&agents, "cursor", "auth-api", "Rust 后端登录 API 与 SQL", None)
             .unwrap();
         assert_eq!(s.name, "codex");
     }
@@ -500,7 +521,7 @@ mod tests {
     #[test]
     fn review_task_prefers_mimo() {
         let agents = specs();
-        let s = suggest_worker(&agents, "cursor", "auth-api-review", "审查 API").unwrap();
+        let s = suggest_worker(&agents, "cursor", "auth-api-review", "审查 API", None).unwrap();
         assert_eq!(s.name, "mimo");
     }
 
@@ -513,6 +534,7 @@ mod tests {
             "codex",
             "dashboard-ui",
             "React dashboard 组件与 CSS 动效",
+            None,
         );
         assert!(msg.is_some());
         assert!(msg.unwrap().contains("kimi"));

@@ -148,6 +148,7 @@ pub fn notify_lead_if_ready(project_dir: &Path, lead: &str) -> Result<bool> {
         "info",
         &format!("merge-ready: 已通知 {lead}（{task_list}）"),
     );
+    let _ = crate::delegation_stats::evolve_project(project_dir);
     Ok(true)
 }
 

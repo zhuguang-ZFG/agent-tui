@@ -771,6 +771,7 @@ pub fn verify_lead_identity_sync(project_dir: &Path) -> Result<()> {
         "codex",
         "ui-dashboard",
         "React dashboard 组件与 Tailwind 样式",
+        Some(project_dir),
     );
     if hint.is_none() {
         bail!("delegation mismatch: expected UI task on codex to suggest kimi");
@@ -792,6 +793,23 @@ pub fn verify_lead_identity_sync(project_dir: &Path) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Outcomes logged from worker reports; evolve refreshes STRENGTHS history section.
+pub fn verify_evolution_records(project_dir: &Path) -> Result<()> {
+    let outcomes = crate::delegation_stats::load_outcomes(project_dir, 50);
+    if outcomes.is_empty() {
+        bail!("evolution: no delegation_outcomes.jsonl records after verify loop");
+    }
+    let n = crate::delegation_stats::evolve_project(project_dir)?;
+    if n == 0 {
+        bail!("evolution: evolve_project returned 0");
+    }
+    let strengths = std::fs::read_to_string(project_dir.join(".agents/STRENGTHS.md"))?;
+    if !strengths.contains("历史表现") {
+        bail!("STRENGTHS.md missing 历史表现 section after evolve");
+    }
     Ok(())
 }
 
@@ -980,6 +998,7 @@ pub fn run_all(project_dir: &Path) -> Result<()> {
     verify_relay_cursor_persist(project_dir).context("relay cursor persist")?;
     verify_blocked_escalation(project_dir).context("blocked advisor escalate")?;
     verify_review_merge_chain().context("review gate + merge-ready")?;
+    verify_evolution_records(project_dir).context("delegation evolution")?;
     crate::project_init::verify_init_scaffold().context("init scaffold")?;
     observer::verify_http_snapshot(project_dir).context("observer HTTP")?;
     observer::verify_sse_stream(project_dir).context("observer SSE")?;
@@ -1017,6 +1036,7 @@ pub fn run_all(project_dir: &Path) -> Result<()> {
     println!("  relay persist: relay_cursor.json 重启恢复 ✓");
     println!("  blocked: max nudges → advisor 自动升级 ✓");
     println!("  review gate: done → task-review → merge-ready ✓");
+    println!("  evolution: outcomes → STRENGTHS 历史表现 ✓");
     println!("  init scaffold: 任意目录 agent-tui init ✓");
     println!("  relay: PTY 未就绪时不推进游标 ✓");
     println!("  dedupe: plan 指纹重启后仍有效 ✓");

@@ -7,6 +7,7 @@ mod config;
 mod conpty;
 mod dead_letter;
 mod delegation;
+mod delegation_stats;
 mod event_timeline;
 mod events_ui;
 mod health;
@@ -215,6 +216,11 @@ enum Commands {
         base: String,
         #[arg(long)]
         draft: bool,
+        #[arg(long)]
+        project_dir: Option<PathBuf>,
+    },
+    /// 汇总委派历史并更新 STRENGTHS.md（运行时进化）
+    Evolve {
         #[arg(long)]
         project_dir: Option<PathBuf>,
     },
@@ -604,6 +610,11 @@ fn run_command(cmd: Commands) -> Result<()> {
             if !outcome.created {
                 std::process::exit(1);
             }
+        }
+        Commands::Evolve { project_dir } => {
+            let project_dir = config::resolve_project_dir(project_dir)?;
+            let n = delegation_stats::evolve_project(&project_dir)?;
+            println!("已更新 .agents/STRENGTHS.md 历史表现（{n} 条委派记录）");
         }
     }
     Ok(())

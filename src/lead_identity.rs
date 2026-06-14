@@ -57,6 +57,7 @@ alwaysApply: true
 | DAG `depends_on` 延迟派发 | blocked/failed 时调整计划或改派 |
 | failed 任务自动重试（有限次，按专长轮换） | review 产出、合并前让 reviewer 审查 |
 | 委派错配提示 `【委派建议】` | 收到建议后改派或说明为何坚持当前 worker |
+| `delegation_outcomes.jsonl` 历史 | 成功率影响 `suggest_worker`；`agent-tui evolve` 刷新 STRENGTHS |
 
 Playbook（人类可读）：`{playbook_s}`  
 能力表：`.agents/STRENGTHS.md`  
@@ -216,9 +217,10 @@ pub fn sync_lead_context(project_dir: &Path, lead: &str, worktree: &Path) -> Res
     fs::write(lead_playbook_path(project_dir), &playbook)
         .with_context(|| format!("write {}", lead_playbook_path(project_dir).display()))?;
 
-    let strengths = agent_strengths::strengths_doc_body(&agents, lead);
+    let strengths = agent_strengths::strengths_doc_body(&agents, lead, Some(project_dir));
     fs::write(strengths_path(project_dir), &strengths)
         .with_context(|| format!("write {}", strengths_path(project_dir).display()))?;
+    let _ = crate::delegation_stats::patch_strengths_history(project_dir);
 
     let rules_dir = worktree.join(".cursor/rules");
     fs::create_dir_all(&rules_dir).with_context(|| format!("mkdir {}", rules_dir.display()))?;

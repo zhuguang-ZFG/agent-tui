@@ -26,7 +26,7 @@ pub fn delegate_task(
     validate_task_name(task)?;
     if let Ok(agents) = config::load_agents(project_dir) {
         if let Some(hint) =
-            agent_strengths::delegation_mismatch(&agents, lead, worker, task, description)
+            agent_strengths::delegation_mismatch(&agents, lead, worker, task, description, Some(project_dir))
         {
             terminal::log_message(project_dir, "info", &hint);
             let _ = meta::notify_agent_from(project_dir, lead, &hint, "agent-tui");
@@ -206,6 +206,16 @@ pub fn report_task_auto(
         &summary,
         &desc,
     );
+    let _ = crate::delegation_stats::record_outcome(
+        project_dir,
+        reporter,
+        task,
+        status,
+        &desc,
+        lead,
+        &summary,
+    );
+    let _ = crate::delegation_stats::maybe_auto_evolve(project_dir);
     if status == "done" || status == "failed" || status == "blocked" {
         let _ = crate::lead_followup::on_worker_report(project_dir, reporter, task, status);
     }
