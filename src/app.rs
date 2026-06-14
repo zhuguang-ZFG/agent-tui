@@ -29,7 +29,7 @@ use crate::pr_lifecycle;
 use crate::ops;
 
 const MAX_PANES: usize = 8;
-const SPAWN_STAGGER_MS: u64 = 1000;
+const SPAWN_STAGGER_MS: u64 = 2000;
 const PTY_RESIZE_WARMUP: Duration = Duration::from_secs(5);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(2);
 const META_INTERVAL: Duration = Duration::from_secs(5);

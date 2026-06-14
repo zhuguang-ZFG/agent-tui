@@ -9,6 +9,9 @@ const FATAL: &[&str] = &[
     "Failed to create TextBuffer",
     "TextBuffer is destroyed",
     "A fatal error occurred!",
+    "error.OutOfMemory",
+    "An error occurred in Effect.tryPromise",
+    "FATAL ERROR",
 ];
 
 const WARN: &[&str] = &[
@@ -47,5 +50,17 @@ mod tests {
     fn detects_claude_warn() {
         let state = scan_screen("9 setup issues: MCP");
         assert!(matches!(state, HealthState::Warn(_)));
+    }
+
+    #[test]
+    fn detects_oom_fatal() {
+        let state = scan_screen("Failed to create renderer: error.OutOfMemory");
+        assert!(matches!(state, HealthState::Dead(_)));
+    }
+
+    #[test]
+    fn detects_effect_crash_fatal() {
+        let state = scan_screen("An error occurred in Effect.tryPromise");
+        assert!(matches!(state, HealthState::Dead(_)));
     }
 }
